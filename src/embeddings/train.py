@@ -1,43 +1,68 @@
-# training loop
-
+# training loop for autoencoder
 import torch
 from torch.utils.data import DataLoader
-import os
-if os.getcwd().endswith("embeddings"):
-    os.chdir("../") # set cwd to src/
-from embeddings.models import MotionAutoencoder
-from embeddings.dataset import WindowDataset
+from src.embeddings.models import MotionAutoencoder
 
-# Parameters
-window_size = 30
-step_size = 10
-batch_size = 16
-epochs = 50
-lr = 1e-3
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Dataset & DataLoader
-dataset = WindowDataset(df_dict, hand="Right", feature_mode="pos_vel", 
-                        window_size=window_size, step_size=step_size)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+def train_ae(
+    dataset,
+    feature_dim=4,
+    latent_dim=16,
+    batch_size=16,
+    epochs=50,
+    lr=1e-3,
+    device="cpu",
+    patience=10,          # set None to disable early stopping
+    delta=1e-5            # minimum improvement
+):
+    from copy import deepcopy
+    import torch
+    from torch.utils.data import DataLoader
 
-# Autoencoder
-feature_dim = 4
-latent_dim = 32
-ae = MotionAutoencoder(feature_dim, latent_dim=latent_dim).to(device)
-optimizer = torch.optim.Adam(ae.parameters(), lr=lr)
-criterion = torch.nn.MSELoss()
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-# Training loop
-ae.train()
-for epoch in range(epochs):
-    epoch_loss = 0
-    for x, _ in dataloader:
-        x = x.to(device)
-        optimizer.zero_grad()
-        out, _ = ae(x)
-        loss = criterion(out, x)
-        loss.backward()
-        optimizer.step()
-        epoch_loss += loss.item() * x.size(0)
-    print(f"Epoch {epoch+1}, Loss: {epoch_loss / len(dataset):.6f}")
+    ae = MotionAutoencoder(feature_dim, latent_dim=latent_dim).to(device)
+    optimizer = torch.optim.Adam(ae.parameters(), lr=lr)
+    criterion = torch.nn.MSELoss()
+
+    best_loss = float("inf")
+    best_state = None
+    wait = 0    # number of epochs without improvement
+
+    ae.train()
+    for epoch in range(epochs):
+
+        epoch_loss = 0.0
+        for x, _ in dataloader:
+            x = x.to(device)
+            optimizer.zero_grad()
+            out, _ = ae(x)
+            loss = criterion(out, x)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * x.size(0)
+
+        epoch_loss /= len(dataset)
+        print(f"Epoch {epoch+1}/{epochs} — Loss: {epoch_loss:.6f}")
+
+        # ------------------------
+        # Early stopping logic
+        # ------------------------
+        if patience is not None:
+            if epoch_loss < best_loss - delta:
+                best_loss = epoch_loss
+                best_state = deepcopy(ae.state_dict())
+                wait = 0
+            else:
+                wait += 1
+                if wait >= patience:
+                    print(f"\nEarly stopping triggered at epoch {epoch+1}.")
+                    break
+
+    # Load best weights if early stopped
+    if best_state is not None:
+        ae.load_state_dict(best_state)
+
+    return ae, best_loss
+
+

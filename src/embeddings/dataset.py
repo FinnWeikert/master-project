@@ -52,7 +52,7 @@ class WindowDataset(Dataset):
         step_size=5,
         orig_fps=30.0,
         max_gap_seconds=0.11,
-        normalize=False,
+        normalize=True,
         device="cpu",
         video_dimensions=(1920, 1080)
     ):
