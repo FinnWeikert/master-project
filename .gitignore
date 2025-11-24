@@ -1,5 +1,43 @@
+# ----------------------------------------------------------------------
+# Custom Project Exclusions
+# ----------------------------------------------------------------------
+
 # Ignore everything in the /data folder
 data/*
 
 # But keep the folder itself (optional)
 !data/.gitkeep
+
+
+# ----------------------------------------------------------------------
+# Standard Python Exclusions
+# ----------------------------------------------------------------------
+
+# Byte-code files
+*.pyc
+*$$py.class
+
+# The __pycache__ directory
+__pycache__/
+
+# Python 2 specific cache
+.python-version
+
+# Virtual environment folders
+venv/
+.venv/
+env/
+.env/
+
+# Distribution / Packaging
+dist/
+build/
+*.egg-info/
+
+# Logs and Documentation
+*.log
+docs/_build/
+
+# Temporary / OS files
+*~
+.DS_Store
