@@ -147,7 +147,7 @@ class TrajectoryProcessor:
     # ------------------- Interpolation ---------------------------------------
     # -------------------------------------------------------------------------
 
-    def interpolate_gaps(self, df, max_gap_sec=0.2):
+    def interpolate_gaps(self, df, max_gap_sec=0.21):
         """
         Linearly interpolates short gaps in hand trajectories.
         

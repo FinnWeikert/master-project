@@ -124,6 +124,8 @@ def plot_embedding_map(
     plt.colorbar(sc, label="Label")
 
     for i, vid in enumerate(video_ids):
+        if isinstance(vid, (float)):
+            vid = round(vid, 3)
         plt.text(Z[i, 0], Z[i, 1], str(vid), fontsize=7)
 
     plt.title(title)

@@ -8,7 +8,7 @@ class EmbeddingExtractor:
     Extract latent embeddings from full motion sequences using a trained AE.
     """
 
-    def __init__(self, model, window_size=30, step_size=10, device="cpu"):
+    def __init__(self, model, window_size=20, step_size=5, device="cpu"):
         self.model = model.to(device)
         self.model.eval()
         self.window_size = window_size
