@@ -2,11 +2,132 @@
 from copy import deepcopy
 import torch
 from torch.utils.data import DataLoader
-from src.embeddings.models import MotionAutoencoder
+from src.embeddings.models import MotionAutoencoder, MotionAutoencoderTCN
+from tqdm import tqdm
 
-def train_ae(
+import torch
+import torch.nn as nn
+from copy import deepcopy
+from tqdm import tqdm
+
+
+def train_autoencoder(
+    model,
+    train_loader,
+    val_loader=None,
+    epochs=50,
+    lr=1e-3,
+    device="cpu",
+    patience=10,
+    delta=1e-5,
+    lambda_aug=0.0,
+):
+    """
+    Generic training loop for motion autoencoders.
+
+    Assumes:
+        - input shape is (B, T, D)
+        - last feature is a VALID MASK ∈ {0,1}
+        - model(x) returns (recon, latent)
+        - recon has shape (B, T, D-1)
+    """
+
+    model = model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    best_loss = float("inf")
+    best_state = None
+    wait = 0
+
+    # -----------------------------
+    #      training loop
+    # -----------------------------
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+
+        for x, _ in tqdm(train_loader, desc=f"Epoch {epoch+1:03d}"):
+            x = x.to(device)
+            motion = x[..., :-1]
+            valid = x[..., -1:]
+
+            optimizer.zero_grad()
+
+            # ===== PASS 1 — clean input =====
+            out, latent_clean = model(x)
+            diff = (out - motion) * valid
+            mse_recon = (diff ** 2).sum() / (valid.sum() + 1e-6)
+
+            # ===== PASS 2 — augmented =====
+            if lambda_aug > 0:
+                x_aug = x.clone()
+                B, T, _ = x.shape
+
+                drop = (torch.rand(B, T, 1, device=device) < 0.1)
+                x_aug[..., :-1] = x_aug[..., :-1] * (~drop)
+
+                _, latent_aug = model(x_aug)
+                mse_aug = torch.mean((latent_clean - latent_aug) ** 2)
+            else:
+                mse_aug = 0.0
+
+            loss = mse_recon + lambda_aug * mse_aug
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item() * x.size(0)
+
+        train_loss /= len(train_loader.dataset)
+
+        # -----------------------------
+        #    validation loss
+        # -----------------------------
+        if val_loader is not None:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for x, _ in val_loader:
+                    x = x.to(device)
+                    motion = x[..., :-1]
+                    valid = x[..., -1:]
+
+                    out, _ = model(x)
+                    diff = (out - motion) * valid
+                    val_loss += (diff ** 2).sum().item()
+
+            val_loss /= (len(val_loader.dataset))
+
+            print(f"Epoch {epoch+1:03d} — train: {train_loss:.6f} | val: {val_loss:.6f}")
+
+            current_loss = val_loss
+        else:
+            print(f"Epoch {epoch+1:03d} — train loss: {train_loss:.6f}")
+            current_loss = train_loss
+
+        # -----------------------------
+        #       Early stopping
+        # -----------------------------
+        if current_loss < best_loss - delta:
+            best_loss = current_loss
+            best_state = deepcopy(model.state_dict())
+            wait = 0
+        else:
+            wait += 1
+            if patience and wait >= patience:
+                print("\nEarly stopping triggered.")
+                break
+
+    # restore best model
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    return model, best_loss
+
+
+
+def train_tcn_ae(
     dataset,
-    feature_dim=5,              # now includes "valid" channel
+    feature_dim=5,
     latent_dim=16,
     batch_size=16,
     epochs=50,
@@ -14,67 +135,64 @@ def train_ae(
     device="cpu",
     patience=10,
     delta=1e-5,
-    lambda_aug=0.0,             # set > 0 to enable augmentation consistency loss
+    lambda_aug=0.1,
 ):
-    """
-    Train MotionAutoencoder with masked loss and optional synthetic gap augmentation.
-    Assumes last feature in input is 'valid' mask.
-    """
-    
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    ae = MotionAutoencoder(
+    ae = MotionAutoencoderTCN(
         feature_dim=feature_dim,
         latent_dim=latent_dim,
         dropout_prob=0.1 if lambda_aug > 0 else 0.0
     ).to(device)
 
     optimizer = torch.optim.Adam(ae.parameters(), lr=lr)
-
     best_loss = float("inf")
     best_state = None
     wait = 0
 
     ae.train()
     for epoch in range(epochs):
-
         epoch_loss = 0.0
 
-        for x, _ in dataloader:
-
+        # tdqm for progress bar
+        for _, (x, _) in enumerate(tqdm(dataloader, desc=f"Epoch {epoch+1:03d}")):
             x = x.to(device)
-
-            motion = x[..., :-1]          # real motion
-            valid = x[..., -1:]           # (batch, T, 1)
+            motion = x[..., :-1]
+            valid = x[..., -1:]
 
             optimizer.zero_grad()
 
-            # ------ PASS 1: normal input ------
-            out, latent_clean = ae(x)     # recon motion only
+            # ===== normal pass =====
+            out, latent_clean = ae(x)
 
-            # masked MSE
             diff = (out - motion) * valid
-            mse_recon = (diff ** 2).sum() / (valid.sum() + 1e-6)
+            num_valid = valid.sum() * motion.shape[-1]
+            mse_recon = (diff**2).sum() / (num_valid + 1e-6)
 
-            # ------ PASS 2: augmented input ------
+            # ===== smoothness penalty =====
+            vel_out = out[:,1:] - out[:,:-1]
+            vel_gt  = motion[:,1:] - motion[:,:-1]
+            smooth = ((vel_out - vel_gt)**2 * valid[:,1:]).sum()
+            smooth /= (valid[:,1:].sum() * motion.shape[-1] + 1e-6)
+
+            # ===== augmentation =====
             if lambda_aug > 0:
                 x_aug = x.clone()
                 B, T, D = x_aug.shape
+                drop_mask = (torch.rand(B, T, 1, device=device) < 0.05)
 
-                # randomly drop some valid frames (fake tracking loss)
-                drop_mask = (torch.rand(B, T, 1, device=device) < 0.1)
-                x_aug[..., :-1] = x_aug[..., :-1] * (~drop_mask)   # zero out motion at dropped frames
-                # keep valid mask unchanged
+                x_aug[..., :-1] *= (~drop_mask)
+                x_aug[..., -1:] *= (~drop_mask)
 
                 _, latent_aug = ae(x_aug)
-
-                # consistency loss
                 mse_aug = torch.mean((latent_clean - latent_aug)**2)
             else:
                 mse_aug = 0.0
 
-            total_loss = mse_recon + lambda_aug * mse_aug
+            total_loss = mse_recon + 0.1 * smooth + lambda_aug * mse_aug
             total_loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(ae.parameters(), 5.0)
             optimizer.step()
 
             epoch_loss += total_loss.item() * x.size(0)
@@ -82,7 +200,7 @@ def train_ae(
         epoch_loss /= len(dataset)
         print(f"Epoch {epoch+1:03d} — loss: {epoch_loss:.6f}")
 
-        # ---- early stopping ----
+        # ===== early stop =====
         if epoch_loss < best_loss - delta:
             best_loss = epoch_loss
             best_state = deepcopy(ae.state_dict())
@@ -90,7 +208,7 @@ def train_ae(
         else:
             wait += 1
             if patience and wait >= patience:
-                print("\nEarly stopping.")
+                print("Early stopping.")
                 break
 
     if best_state is not None:

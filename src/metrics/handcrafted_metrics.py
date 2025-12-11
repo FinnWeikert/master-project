@@ -70,17 +70,29 @@ def compute_extended_hand_metrics(df_hand, hand_label="Right",min_disp=1.0, fps=
     moving = df["velocity"] > velocity_threshold
     intermittency_ratio = (moving.astype(int).diff().abs().sum() / len(moving)
                             if moving.any() else 0)
+    
+    # --- fraction tracked ---
+    fraction_tracked = (df["frame"].count() / (df["frame"].max() - df["frame"].min())) * df['frame_diff'].median()
+    if df['frame_diff'].median() not in {1, 3}:
+        print("Warning: unexpected frame difference median:", df['frame_diff'].median())
+
+    adjusted_total_path = total_path / fraction_tracked
 
     metrics = pd.DataFrame([{
         f"total_path_{hand_label}": total_path,
+        f"adjusted_total_path_{hand_label}": adjusted_total_path,
         f"total_duration_{hand_label}": duration,
+        f"mean_disp_{hand_label}": df["disp_filtered"].mean(skipna=True),
         f"mean_velocity_{hand_label}": mean_velocity,
         f"rms_accel_{hand_label}": rms_accel,
         f"efficiency_{hand_label}": efficiency,
         f"duty_cycle_{hand_label}": duty_cycle,
         f"mean_abs_angle_change_{hand_label}": mean_abs_angle_change,
         f"num_reversals_{hand_label}": num_reversals,
-        f"intermittency_ratio_{hand_label}": intermittency_ratio
+        f"adjusted_num_reversals_{hand_label}": num_reversals / fraction_tracked,
+        f"intermittency_ratio_{hand_label}": intermittency_ratio,
+        f"fraction_tracked_{hand_label}": fraction_tracked
+
     }])
 
     return metrics

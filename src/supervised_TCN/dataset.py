@@ -241,4 +241,4 @@ class MotionFeatureDataset(Dataset):
         window_tensor = torch.tensor(win.T, dtype=torch.float32, device=self.device)
         score_tensor = torch.tensor(grs_score, dtype=torch.float32).unsqueeze(0).to(self.device)
         
-        return window_tensor, score_tensor, surgeon_id
+        return window_tensor, score_tensor, sample_key

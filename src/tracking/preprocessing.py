@@ -18,7 +18,7 @@ class TrajectoryProcessor:
     def __init__(
         self,
         fps=30,
-        max_gap_sec=0.2,
+        max_gap_sec=0.1,
         smoothing_sec=0.3,
         smoothing_poly=2,
         max_jump_px=100,
@@ -147,42 +147,84 @@ class TrajectoryProcessor:
     # ------------------- Interpolation ---------------------------------------
     # -------------------------------------------------------------------------
 
-    def interpolate_gaps(self, df, max_gap_sec=0.21):
+    def interpolate_gaps(self, df, max_gap_sec=0.2):
         """
-        Linearly interpolates short gaps in hand trajectories.
+        Interpolates only short gaps (<= max_gap_sec) in hand trajectories by:
+        1. Identifying small gaps.
+        2. Inserting new rows only for frames within those small gaps.
+        3. Applying linear interpolation across the entire dataframe.
         
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Must contain 'hand_label' and the coordinates in self.center_col (tuple of x,y)
-        max_gap_sec : float
-            Maximum acceptable gap duration (in seconds) to interpolate.
-            Gaps longer than this are left as missing.
-
-        Returns
-        -------
-        df_interp : pd.DataFrame
-            DataFrame with 'cx' and 'cy' interpolated over short gaps.
+        The resulting dataframe contains the original tracked rows and the newly 
+        interpolated rows for short gaps.
         """
-        df = df.copy()
-        df["cx"] = df[self.center_col].apply(lambda p: p[0] if p is not None else np.nan)
-        df["cy"] = df[self.center_col].apply(lambda p: p[1] if p is not None else np.nan)
-
-        # Compute max frames to interpolate based on fps
-        max_interp_frames = int(max_gap_sec * self.fps)
-
-        interpolated_dfs = []
-        for label in ["Left", "Right"]:
-            hand_df = df[df["hand_label"] == label].sort_values("frame").copy()
+        if df.empty:
+            return df
             
-            # Linear interpolation over short gaps only
-            hand_df["cx"] = hand_df["cx"].interpolate(method="linear", limit=max_interp_frames)
-            hand_df["cy"] = hand_df["cy"].interpolate(method="linear", limit=max_interp_frames)
+        df = df.copy() 
 
-            interpolated_dfs.append(hand_df)
+        # --- 1. PREP: Identify Coordinates and Frame Limit ---
+        
+        # Use existing smooth columns if present, otherwise assume raw cx/cy
+        coord_cols = ["cx", "cy"] 
 
-        return pd.concat(interpolated_dfs).sort_values("frame").reset_index(drop=True)
+        max_interp_frames = int(max_gap_sec * self.fps) # !! might be wrong when working with 10 fps !!
+        
+        # --- 2. Create and Insert Rows for ONLY Short Gaps ---
+        
+        df = df.sort_values('frame').reset_index(drop=True)
+        df['frame'] = df['frame'] / float(30 / self.fps)  # Normalize frame numbers to seconds for interpolation
+        
+        # Calculate the frame difference between consecutive tracked points
+        frame_diffs = df['frame'].diff()
+        
+        # Identify the start index of gaps that are *short* (<= max_interp_frames)
+        short_gap_indices = df.index[
+            (frame_diffs > 1) & (frame_diffs <= max_interp_frames)
+        ]
+        
+        rows_to_insert = []
+        
+        for start_idx in short_gap_indices:
+            # 'frame' of the last tracked point before the gap
+            start_frame = df.loc[start_idx - 1, 'frame']
+            # 'frame' of the next tracked point after the gap
+            end_frame = df.loc[start_idx, 'frame']
+            
+            # Create new frames between start_frame + 1 and end_frame - 1
+            new_frames = pd.RangeIndex(start=start_frame + 1, stop=end_frame, step=30/self.fps)
+            
+            for f in new_frames:
+                # Create a row with only the frame number and hand label, 
+                # all coordinate columns will be NaN
+                new_row = {'frame': f, 'hand_label': df.loc[start_idx, 'hand_label']}
+                rows_to_insert.append(new_row)
 
+        # Convert to DataFrame and concatenate with the original data
+        if rows_to_insert:
+            df_new_rows = pd.DataFrame(rows_to_insert)
+            df = pd.concat([df, df_new_rows], ignore_index=True)
+            
+            # Sort again to place the new NaN rows correctly in the sequence
+            df = df.sort_values('frame').reset_index(drop=True)
+            
+        # --- 3. Apply Linear Interpolation ---
+        
+        # Since we only introduced NaN rows in short gaps, a simple linear interpolation 
+        # will only fill those specific holes, leaving the large gaps untouched (as they have no 
+        # intermediate NaN rows to bridge).
+        for col in coord_cols:
+            # Note: If the coordinate columns did not exist, they were created as NaN 
+            # in step 2 for the new rows. Pandas fillna/interpolate will handle this.
+            if col not in df.columns:
+                # Fill the coordinate column for the tracked points if they are NaN (unlikely here)
+                df[col] = df.apply(lambda row: row[col][0] if isinstance(row[col], list) else row[col], axis=1) # Defensive conversion
+                
+            df[col] = df[col].interpolate(method='linear')
+        
+        # Convert frame numbers back to original scale
+        df['frame'] = df['frame'] * float(30 / self.fps)
+        
+        return df
     
     # -------------------------------------------------------------------------
     # --- SEGMENTATION --------------------------------------------------------
@@ -210,8 +252,6 @@ class TrajectoryProcessor:
         """
         df = df.copy()
 
-        df["cx"] = df[self.center_col].apply(lambda p: p[0] if p is not None else np.nan)
-        df["cy"] = df[self.center_col].apply(lambda p: p[1] if p is not None else np.nan)
 
         if self.smoothing_window % 2 == 0:
             window = self.smoothing_window + 1
@@ -242,8 +282,15 @@ class TrajectoryProcessor:
         if len(df) == 0:
             return df
 
+        df = df.copy()
+        df["cx"] = df[self.center_col].apply(lambda p: p[0] if p is not None else np.nan)
+        df["cy"] = df[self.center_col].apply(lambda p: p[1] if p is not None else np.nan)
+        
+        # 1. INTERPOLATION: Fill short gaps with smooth predictions
+        df = self.interpolate_gaps(df, max_gap_sec=self.max_gap_sec)
         df = self.generate_segments(df)
         df = self.smooth(df)
+
 
         return df
 
@@ -261,7 +308,6 @@ class TrajectoryProcessor:
         """
         df = self.swap_labels(df)
         df = self.enforce_hand_label_consistency(df)
-        df = self.interpolate_gaps(df)
 
         left = df[df["hand_label"] == "Left"]
         right = df[df["hand_label"] == "Right"]

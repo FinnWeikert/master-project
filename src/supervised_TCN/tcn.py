@@ -11,36 +11,50 @@ class TemporalBlock(nn.Module):
     """
     Standard TCN block with:
     - Dilated Conv1D
-    - ReLU
+    - Batch Normalization (NEW)
+    - Leaky ReLU (NEW)
     - Dropout
     - Residual connection
     """
     def __init__(self, n_inputs, n_outputs, kernel_size, dilation, padding, dropout=0.2):
         super().__init__()
 
-        # First dilated convolution
+        # --- Block 1 ---
         self.conv1 = nn.Conv1d(
             n_inputs, n_outputs,
             kernel_size,
             padding=padding,
             dilation=dilation
         )
-        self.relu1 = nn.ReLU()
+        # 1. NEW: Batch Normalization after Conv1
+        self.bn1 = nn.BatchNorm1d(n_outputs)
+        
+        # 2. NEW: Leaky ReLU activation
+        self.relu1 = nn.LeakyReLU(0.01) 
         self.dropout1 = nn.Dropout(dropout)
 
-        # Second dilated convolution
+        # --- Block 2 ---
         self.conv2 = nn.Conv1d(
             n_outputs, n_outputs,
             kernel_size,
             padding=padding,
             dilation=dilation
         )
-        self.relu2 = nn.ReLU()
+        # 3. NEW: Batch Normalization after Conv2
+        self.bn2 = nn.BatchNorm1d(n_outputs)
+        
+        # 4. NEW: Leaky ReLU activation
+        self.relu2 = nn.LeakyReLU(0.01)
         self.dropout2 = nn.Dropout(dropout)
 
-        # 1×1 residual projection if needed
+        # 1x1 residual projection if needed
         self.downsample = nn.Conv1d(n_inputs, n_outputs, kernel_size=1) \
             if n_inputs != n_outputs else None
+        
+        # If downsampling is used, the residual must also be normalized
+        if self.downsample is not None:
+             self.bn_downsample = nn.BatchNorm1d(n_outputs)
+
 
         self.init_weights()
 
@@ -50,22 +64,29 @@ class TemporalBlock(nn.Module):
                 nn.init.normal_(conv.weight, mean=0.0, std=0.01)
 
     def forward(self, x):
+        # --- Block 1 Forward Pass ---
         out = self.conv1(x)
+        out = self.bn1(out)  # Apply BN
         out = self.relu1(out)
         out = self.dropout1(out)
 
+        # --- Block 2 Forward Pass ---
         out = self.conv2(out)
+        out = self.bn2(out)  # Apply BN
         out = self.relu2(out)
         out = self.dropout2(out)
 
-        res = x if self.downsample is None else self.downsample(x)
+        # --- Residual Connection ---
+        if self.downsample is None:
+            res = x
+        else:
+            # Apply downsampling convolution
+            res = self.downsample(x)
+            # Apply Batch Norm to the residual path for consistency
+            res = self.bn_downsample(res) 
 
-        return self.relu2(out + res)  # Residual merge
-
-
-# ---------------------------------------------------
-#                Masked TCN Model
-# ---------------------------------------------------
+        # Final merge and activation
+        return self.relu2(out + res)
 
 # ---------------------------------------------------
 #                Masked TCN Model
@@ -104,6 +125,7 @@ class SurgicalTCN(nn.Module):
             )
 
         self.network = nn.Sequential(*layers)
+        self.mil_output_bn = nn.BatchNorm1d(num_channels[-1]) 
 
         # Regression head: Kaiming initialization is not strictly necessary here, 
         # but standard initialization for regression/classification is common.
@@ -144,6 +166,7 @@ class SurgicalTCN(nn.Module):
 
         # 2. Pass Kinematics through TCN
         y = self.network(kinematics)  # (B, hidden, T)
+        y = self.mil_output_bn(y)     # (B, hidden, T)
 
         # 3. Apply Masked Pooling
         pooled = self.masked_global_avg_pool(y, mask)
@@ -192,6 +215,7 @@ class SurgicalTCNEncoder(nn.Module):
             )
 
         self.network = nn.Sequential(*layers)
+        self.mil_output_bn = nn.BatchNorm1d(num_channels[-1])
 
     def masked_global_avg_pool(self, y, mask):
         """
@@ -212,7 +236,8 @@ class SurgicalTCNEncoder(nn.Module):
         
         # 2. Pass Kinematics through TCN
         # Output shape: (B, num_channels[-1], T)
-        y = self.network(kinematics)  
+        y = self.network(kinematics)
+        y = self.mil_output_bn(y)
 
         # 3. Apply Masked Pooling to get Window Embedding
         # Output shape: (B, num_channels[-1])
