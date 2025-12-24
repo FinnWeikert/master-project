@@ -20,7 +20,8 @@ def train_autoencoder(
     device="cpu",
     patience=10,
     delta=1e-5,
-    lambda_aug=0.0,
+    lambda_aug=0.01,
+    lambda_cons=0.01,   # <-- NEW for consistency loss (overlapping windows should have a similar latent representation)
 ):
     """
     Generic training loop for motion autoencoders.
@@ -30,6 +31,7 @@ def train_autoencoder(
         - last feature is a VALID MASK ∈ {0,1}
         - model(x) returns (recon, latent)
         - recon has shape (B, T, D-1)
+        - batch is temporally ordered (for consistency loss)
     """
 
     model = model.to(device)
@@ -39,12 +41,15 @@ def train_autoencoder(
     best_state = None
     wait = 0
 
-    # -----------------------------
-    #      training loop
-    # -----------------------------
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
+        recon_loss = 0.0
+        aug_loss = 0.0
+        cons_loss = 0.0
+
+        if epoch == 2:
+            d = 1
 
         for x, _ in tqdm(train_loader, desc=f"Epoch {epoch+1:03d}"):
             x = x.to(device)
@@ -58,29 +63,48 @@ def train_autoencoder(
             diff = (out - motion) * valid
             mse_recon = (diff ** 2).sum() / (valid.sum() + 1e-6)
 
-            # ===== PASS 2 — augmented =====
+            # ===== PASS 2 — augmented (optional) =====
             if lambda_aug > 0:
                 x_aug = x.clone()
                 B, T, _ = x.shape
-
                 drop = (torch.rand(B, T, 1, device=device) < 0.1)
-                x_aug[..., :-1] = x_aug[..., :-1] * (~drop)
+                x_aug[..., :-1] *= (~drop)
 
                 _, latent_aug = model(x_aug)
                 mse_aug = torch.mean((latent_clean - latent_aug) ** 2)
             else:
                 mse_aug = 0.0
 
-            loss = mse_recon + lambda_aug * mse_aug
+            # ===== PASS 3 — latent consistency (NEW) =====
+            if lambda_cons > 0 and latent_clean.shape[0] > 1:
+                # Normalize to prevent trivial collapse
+                z = torch.nn.functional.normalize(latent_clean, dim=-1)
+                consistency_loss = torch.mean((z[1:] - z[:-1]) ** 2)
+            else:
+                consistency_loss = 0.0
+
+            # ===== TOTAL LOSS =====
+            loss = (
+                mse_recon
+                + lambda_aug * mse_aug
+                + lambda_cons * consistency_loss
+            )
+
             loss.backward()
             optimizer.step()
 
             train_loss += loss.item() * x.size(0)
+            recon_loss += mse_recon.item() * x.size(0)
+            aug_loss += mse_aug.item() * x.size(0)
+            cons_loss += consistency_loss.item() * x.size(0)
 
         train_loss /= len(train_loader.dataset)
+        recon_loss /= len(train_loader.dataset)
+        aug_loss /= len(train_loader.dataset)
+        cons_loss /= len(train_loader.dataset)
 
         # -----------------------------
-        #    validation loss
+        # Validation
         # -----------------------------
         if val_loader is not None:
             model.eval()
@@ -93,19 +117,17 @@ def train_autoencoder(
 
                     out, _ = model(x)
                     diff = (out - motion) * valid
-                    val_loss += (diff ** 2).sum().item()
+                    val_loss += (diff ** 2).sum().item() / (valid.sum() + 1e-6)
 
-            val_loss /= (len(val_loader.dataset))
-
-            print(f"Epoch {epoch+1:03d} — train: {train_loss:.6f} | val: {val_loss:.6f}")
-
+            val_loss /= len(val_loader.dataset)
+            print(f"Epoch {epoch+1:03d} — train: {train_loss:.6f} (rec:{recon_loss:.6f}, aug:{aug_loss:.6f}, cons:{cons_loss:.6f}) | val: {val_loss:.6f}")
             current_loss = val_loss
         else:
             print(f"Epoch {epoch+1:03d} — train loss: {train_loss:.6f}")
             current_loss = train_loss
 
         # -----------------------------
-        #       Early stopping
+        # Early stopping
         # -----------------------------
         if current_loss < best_loss - delta:
             best_loss = current_loss
@@ -117,11 +139,11 @@ def train_autoencoder(
                 print("\nEarly stopping triggered.")
                 break
 
-    # restore best model
     if best_state is not None:
         model.load_state_dict(best_state)
 
     return model, best_loss
+
 
 
 

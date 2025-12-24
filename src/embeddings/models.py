@@ -11,7 +11,7 @@ class MotionAutoencoder(nn.Module):
 
     def __init__(self, feature_dim, latent_dim=16,
                  hidden_channels=[16, 32], kernel_size=5,
-                 dilations=[1, 2], dropout_prob=0.0):
+                 dilations=[1, 2], dropout_prob=0.0, T=90):
         super().__init__()
 
         self.feature_dim = feature_dim
@@ -38,6 +38,7 @@ class MotionAutoencoder(nn.Module):
         # Latent
         self.fc_enc = nn.Linear(hidden_channels[-1], latent_dim)
         self.fc_dec = nn.Linear(latent_dim, hidden_channels[-1])
+        
 
         # --------- DECODER ---------
         dec_layers = []
@@ -62,6 +63,10 @@ class MotionAutoencoder(nn.Module):
         ]
         self.decoder = nn.Sequential(*dec_layers)
 
+        # temporal embedding 
+        self.time_proj = nn.Linear(1, hidden_channels[-1])
+
+
     def forward(self, x):
         motion = x[..., :-1]  # (B,T,D-1)
         mask   = x[..., -1:]  # (B,T,1)
@@ -72,8 +77,14 @@ class MotionAutoencoder(nn.Module):
         z_pool = z_enc.mean(dim=-1)      # (B,C)
         latent = self.fc_enc(z_pool)     # (B,latent_dim)
 
+        # time projection
+        B, T, _ = motion.shape
+        t = torch.linspace(-1, 1, T, device=x.device).unsqueeze(1)  # (T,1)
+        time_embed = self.time_proj(t).transpose(0,1).unsqueeze(0).expand(B, -1, -1) # (B,C,T)
+
         # Decoder
-        z_dec = self.fc_dec(latent).unsqueeze(-1).repeat(1, 1, z_enc.shape[-1])
+        z_dec = self.fc_dec(latent).unsqueeze(-1)  # (B,C,1)
+        z_dec = z_dec + time_embed  # (B,C,T)
         out = self.decoder(z_dec)        # (B,C,T)
         out = out.transpose(1, 2)        # (B,T,C)
 
