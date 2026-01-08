@@ -262,9 +262,16 @@ def compare_trajectories(video_path, df_30_fps=None, df_10_fps=None, tail_length
     return output_video_path
 
 
+import cv2
+import pandas as pd
+import numpy as np
+import os
+from tqdm import tqdm
+
 def draw_hand_trajectories_new(video_path, df_processed=None, fps=30, tail_length=30):
     """
-    Annotates a video with trajectories for ALL smoothed landmarks found in the dataframe.
+    Annotates a video with trajectories. 
+    The 'head' dot is only drawn if tracking data exists for the EXACT current frame.
     """
     # --- 1. Load Data ---
     base_name = os.path.basename(video_path).replace('.mp4', '')
@@ -275,19 +282,16 @@ def draw_hand_trajectories_new(video_path, df_processed=None, fps=30, tail_lengt
         df = df_processed.copy()
 
     # --- 2. Setup Landmarks & Colors ---
-    # Find all smoothed coordinate columns (e.g., lm_0_x_smooth)
+    # Find all smoothed coordinate columns
     x_cols = [c for c in df.columns if c.endswith('_x_smooth')]
     landmark_ids = [c.split('_')[1] for c in x_cols]
 
-    # Assign a fixed color palette for specific MediaPipe IDs
-    # BGR format
     landmark_colors = {
         '0': (0, 255, 0),    # Wrist: Green
         '5': (255, 255, 0),  # Index MCP: Cyan
         '17': (0, 255, 255), # Pinky MCP: Yellow
     }
-    # Fallback for any other landmarks
-    default_palette = [(255, 0, 0), (255, 0, 255), (0, 165, 255)] # Blue, Magenta, Orange
+    default_palette = [(255, 0, 0), (255, 0, 255), (0, 165, 255)]
 
     # --- 3. Setup Video IO ---
     cap = cv2.VideoCapture(video_path)
@@ -312,8 +316,11 @@ def draw_hand_trajectories_new(video_path, df_processed=None, fps=30, tail_lengt
                 break
 
             for hand_label in ['Right', 'Left']:
-                # Filter data for the "tail" window
+                # Filter data for the "tail" window up to current frame
                 tail_start = max(0, current_frame - tail_length)
+                
+                # We filter <= current_frame. If current_frame is a gap, 
+                # path_data will end at the most recent VALID frame before the gap.
                 path_data = df[(df['hand_label'] == hand_label) & 
                                (df['frame'] >= tail_start) & 
                                (df['frame'] <= current_frame)].sort_values('frame')
@@ -324,8 +331,6 @@ def draw_hand_trajectories_new(video_path, df_processed=None, fps=30, tail_lengt
                 for idx, lm_id in enumerate(landmark_ids):
                     x_col = f'lm_{lm_id}_x_smooth'
                     y_col = f'lm_{lm_id}_y_smooth'
-                    
-                    # Select color based on ID or index
                     color = landmark_colors.get(lm_id, default_palette[idx % len(default_palette)])
 
                     # Draw the segments of the tail
@@ -337,13 +342,21 @@ def draw_hand_trajectories_new(video_path, df_processed=None, fps=30, tail_lengt
                         p1 = (int(path_data[x_col].iloc[i-1]), int(path_data[y_col].iloc[i-1]))
                         p2 = (int(path_data[x_col].iloc[i]), int(path_data[y_col].iloc[i]))
                         
-                        # Draw line (thicker as it reaches the current frame)
-                        thickness = 1 if i < len(path_data) - 1 else 2
+                        # Draw line
+                        # Make it thicker if it is the very last segment available
+                        thickness = 2 if i == len(path_data) - 1 else 1
                         cv2.line(frame, p1, p2, color, thickness, cv2.LINE_AA)
                         
-                        # Draw a circle at the very head of the trajectory
+                        # --- MODIFICATION START ---
+                        # Only draw the "head" dot if this last point corresponds 
+                        # exactly to the current video frame.
                         if i == len(path_data) - 1:
-                            cv2.circle(frame, p2, 4, color, -1, cv2.LINE_AA)
+                            # Check if the frame of this point is the current frame
+                            point_frame = int(path_data['frame'].iloc[i])
+                            
+                            if point_frame == current_frame:
+                                cv2.circle(frame, p2, 4, color, -1, cv2.LINE_AA)
+                        # --- MODIFICATION END ---
 
             # Overlay Frame Number
             cv2.putText(frame, f'Frame: {current_frame}', (20, 40), 

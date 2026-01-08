@@ -156,7 +156,7 @@ def compute_bimanual_dexterity(df_left, df_right, fps=30, velocity_threshold=20)
         seg["disp_filtered"] = np.where(
             seg["disp"].isna(), 
             np.nan, 
-            np.where(seg["disp"] > 1, seg["disp"], 0.0)
+            np.where(seg["disp"] > 0, seg["disp"], 0.0)
         )
         df_right.loc[seg.index, ["disp_filtered"]] = seg[["disp_filtered"]]
 

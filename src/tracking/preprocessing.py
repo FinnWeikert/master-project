@@ -3,7 +3,7 @@
 
 import numpy as np
 import pandas as pd
-from scipy.signal import savgol_filter
+from scipy.signal import medfilt, savgol_filter
 
 
 class TrajectoryProcessor:
@@ -398,6 +398,8 @@ class LandmarksProcessor:
         last_frame = {"Left": 0, "Right": 0}
 
         for frame, group in df.groupby("frame"):
+            if frame == 538:
+                d=1
             frame_entries = []
 
             for label in ["Left", "Right"]:
@@ -430,13 +432,17 @@ class LandmarksProcessor:
                     if last_pos[other_label] is not None:
                         ox, oy = last_pos[other_label]
                         hx, hy = row[self.center_col]
-                        if np.hypot(hx - ox, hy - oy) < 30:  # too close
-                            last_pos[label] = None
+                        if np.hypot(hx - ox, hy - oy) < 40:  # too close
+                            if frame - last_frame[other_label] > 10:
+                                last_pos[other_label] = None
                             continue
 
                 # Multiple hands detected → choose closest to previous
                 else:
-                    if last_pos[label] is not None:
+                    sorted_scores = hands['hand_score'].sort_values(ascending=False).values
+                    if sorted_scores[0] - sorted_scores[1] > 0.1:
+                        row = hands.loc[hands['hand_score'].idxmax()]
+                    elif last_pos[label] is not None:
                         px, py = last_pos[label]
                         d = hands[self.center_col].apply(
                             lambda c: np.hypot(c[0] - px, c[1] - py)
@@ -454,11 +460,127 @@ class LandmarksProcessor:
                     frame_gap = (frame - last_frame[label])
                     if dist > self.max_jump_px * frame_gap:
                         # Resume if long gap
-                        if frame_gap > 6:
+                        if frame_gap > 15:
                             last_pos[label] = row[self.center_col]
                         continue
 
                 last_pos[label] = row[self.center_col]
+                last_frame[label] = frame
+                frame_entries.append(row)
+
+            cleaned.extend(frame_entries)
+
+        return pd.DataFrame(cleaned).reset_index(drop=True)
+    
+
+    def enforce_hand_label_consistency_new(self, df):
+        """
+        Conservative approach: Prioritizes dropping doubtful frames over 
+        interpolating false jumps. Strictly rejects 'Ghost' detections 
+        that appear on top of the other active hand.
+        """
+        # --- CONFIGURATION ---
+        MIN_CONFIDENCE = 0.5       # Drop weak detections immediately
+        COLLISION_RADIUS = 50      # If Left/Right are this close, reject the weaker one
+        REENTRY_COLLISION_GUARD = 100 # Stricter radius when a hand 'reappears' after a gap
+
+        df = df.sort_values("frame").reset_index(drop=True)
+        cleaned = []
+
+        last_pos = {"Left": None, "Right": None}
+        last_frame = {"Left": 0, "Right": 0}
+
+        for frame, group in df.groupby("frame"):
+            frame_entries = []
+
+            # We iterate labels, but checking 'other_label' dynamically 
+            # allows us to compare against the *freshest* data available.
+            for label in ["Left", "Right"]:
+                other_label = "Right" if label == "Left" else "Left"
+                
+                # 1. Filter by Confidence first (Conservative Step)
+                hands = group[(group["hand_label"] == label) & (group["hand_score"] > MIN_CONFIDENCE)]
+
+                # --- CASE A: NO HAND DETECTED ---
+                if len(hands) == 0:
+                    # Check if we should clear history due to edge exit or timeout
+                    if last_pos[label] is not None:
+                        x, y = last_pos[label]
+                        # Edge exit logic
+                        if (x < 25 or x > self.frame_width - 25 or 
+                            y < 25 or y > self.frame_height - 25):
+                            last_pos[label] = None
+                    
+                    # Timeout logic (short memory prevents connecting across huge gaps)
+                    if frame - last_frame[label] > 6:
+                        last_pos[label] = None
+                    continue
+
+                # --- CASE B: CANDIDATE SELECTION ---
+                # Determine the best candidate row
+                if len(hands) == 1:
+                    row = hands.iloc[0]
+                else:
+                    # Multiple candidates: 
+                    # If we have history, pick the one closest to last known pos
+                    if last_pos[label] is not None:
+                        px, py = last_pos[label]
+                        d = hands[self.center_col].apply(lambda c: np.hypot(c[0] - px, c[1] - py))
+                        row = hands.loc[d.idxmin()]
+                    else:
+                        # No history? Pick the highest confidence
+                        row = hands.loc[hands['hand_score'].idxmax()]
+
+                # --- CASE C: CONSERVATIVE VALIDATION (The Fix) ---
+                
+                current_pos = row[self.center_col]
+                valid_candidate = True
+
+                # 1. Check Collision with OTHER Hand (Prevent "Hand Stealing")
+                # We check against the other hand's last known position
+                if last_pos[other_label] is not None:
+                    ox, oy = last_pos[other_label]
+                    dist_to_other = np.hypot(current_pos[0] - ox, current_pos[1] - oy)
+                    
+                    # If we are too close to the other hand, this is suspicious.
+                    if dist_to_other < COLLISION_RADIUS:
+                        # CONSERVATIVE: If we are clashing, drop this current detection.
+                        # It is better to have a gap than a swapped label.
+                        valid_candidate = False
+
+                if not valid_candidate:
+                    continue
+
+                # 2. Check Jumps / Continuity
+                if last_pos[label] is not None:
+                    dx = current_pos[0] - last_pos[label][0]
+                    dy = current_pos[1] - last_pos[label][1]
+                    dist_jump = np.hypot(dx, dy)
+                    frame_gap = frame - last_frame[label]
+
+                    # Threshold: Allow larger jumps only if gap is small
+                    max_allowed = 0.5 * self.max_jump_px * (1 + frame_gap)
+                    
+                    if dist_jump > max_allowed:
+                        # --- RE-ENTRY LOGIC ---
+                        # If the gap was long (>15), this might be a valid re-entry.
+                        # BUT, we must ensure it's not a "Ghost" of the other hand.
+                        if frame_gap > 15:
+                            # Re-entry Guard: Only accept if far from other hand
+                            if last_pos[other_label] is not None:
+                                ox, oy = last_pos[other_label]
+                                if np.hypot(current_pos[0]-ox, current_pos[1]-oy) < REENTRY_COLLISION_GUARD:
+                                    # It reappeared right on top of the other hand -> REJECT
+                                    continue
+                            
+                            # If passed guard, accept as new position (teleport allowed on re-entry)
+                            pass 
+                        else:
+                            # Short gap + Huge jump = Noise/Teleport -> REJECT
+                            continue
+
+                # --- ACCEPTANCE ---
+                last_pos[label] = current_pos
                 last_frame[label] = frame
                 frame_entries.append(row)
 
@@ -473,14 +595,7 @@ class LandmarksProcessor:
 
     def interpolate_gaps(self, df, max_gap_sec=0.2):
         """
-        Interpolates short gaps in a 'landmarks' column where each element is a dict:
-        {landmark_id: (x, y), ...}.
-        
-        Strategy:
-        1. Explode 'landmarks' dicts into flat columns (0_x, 0_y, 5_x, etc.).
-        2. Insert NaN rows for missing frames within short gaps.
-        3. Linear Interpolate the flat columns.
-        4. Implode the flat columns back into the 'landmarks' dict format.
+        Interpolates short gaps ONLY if the spatial jump is physically plausible.
         """
         if df.empty or 'landmarks' not in df.columns:
             return df
@@ -488,14 +603,9 @@ class LandmarksProcessor:
         df = df.sort_values('frame').reset_index(drop=True)
         
         # --- 1. PREP: Explode the Dictionary Column ---
-        # We convert the list of dicts into a DataFrame of columns like 'lm_0_x', 'lm_0_y'
-        # We assume all rows track the same set of landmarks (based on the first valid row)
-        
-        # Get all unique landmark IDs from the first non-empty row to establish schema
         first_valid_entry = df['landmarks'].dropna().iloc[0]
         tracked_ids = list(first_valid_entry.keys())
         
-        # Fast flattening using list comprehension
         flattened_data = []
         for entry in df['landmarks']:
             row_flat = {}
@@ -506,38 +616,39 @@ class LandmarksProcessor:
             flattened_data.append(row_flat)
             
         df_flat = pd.DataFrame(flattened_data)
-        
-        # Combine with metadata (frame, hand_label, etc.)
-        # We drop the original complex 'landmarks' column for now
         df_merged = pd.concat([df.drop(columns=['landmarks']), df_flat], axis=1)
 
-        # --- 2. Identify Gaps and Insert Rows ---
-        
+        # --- 2. Identify Gaps and Insert Rows (with Spatial Check) ---
         max_gap_frames = int(max_gap_sec * self.fps)
-        
-        # Calculate difference between consecutive frame numbers
         frame_diffs = df_merged['frame'].diff()
         
-        # Find gaps that are missing data (>1) but are small enough (<= max)
+        # We look for temporal gaps that are small enough to potentially interpolate
         short_gap_mask = (frame_diffs > 1) & (frame_diffs <= max_gap_frames)
         short_gap_indices = df_merged.index[short_gap_mask]
         
         rows_to_insert = []
         
         for idx in short_gap_indices:
-            start_frame = int(df_merged.loc[idx - 1, 'frame'])
-            end_frame = int(df_merged.loc[idx, 'frame'])
+            # Get endpoints of the gap
+            prev_row = df_merged.loc[idx - 1]
+            curr_row = df_merged.loc[idx]
             
-            # Determine the constant columns (e.g., hand_label) from the PREVIOUS valid frame
-            # to propagate them into the gap
-            base_row = df_merged.loc[idx - 1, ['hand_label']].to_dict()
+            # Calculate Euclidean distance of the jump (using palm center cx, cy)
+            dist = np.hypot(curr_row['cx'] - prev_row['cx'], 
+                            curr_row['cy'] - prev_row['cy'])
             
-            # Create missing frames
-            # range(start + 1, end) creates integers strictly between start and end
-            for f in range(start_frame + 1, end_frame):
+            # SPATIAL GUARDRAIL:
+            # If the hand 'teleported' faster than max_jump_px * time_elapsed, 
+            # we do NOT insert rows to interpolate. We let it remain a gap.
+            frame_gap = curr_row['frame'] - prev_row['frame']
+            if dist > (self.max_jump_px * frame_gap):
+                continue # Skip interpolation for this specific gap
+
+            # If it passed the check, create the missing frame rows
+            base_row = prev_row[['hand_label']].to_dict()
+            for f in range(int(prev_row['frame']) + 1, int(curr_row['frame'])):
                 new_row = base_row.copy()
                 new_row['frame'] = f
-                # All 'lm_...' columns will implicitly be NaN
                 rows_to_insert.append(new_row)
                 
         if rows_to_insert:
@@ -546,32 +657,16 @@ class LandmarksProcessor:
             df_merged = df_merged.sort_values('frame').reset_index(drop=True)
 
         # --- 3. Apply Linear Interpolation ---
-        
-        # Identify the coordinate columns we generated earlier
         coord_cols = [c for c in df_merged.columns if c.startswith('lm_')] + ['cx', 'cy']
         
-        # Interpolate only the coordinate columns
-        df_merged[coord_cols] = df_merged[coord_cols].interpolate(method='linear', limit_direction='both')
+        # limit=max_gap_frames ensures we don't accidentally fill massive holes
+        df_merged[coord_cols] = df_merged[coord_cols].interpolate(
+            method='linear', 
+            limit=max_gap_frames,
+            limit_area='inside'
+        )
 
-        # --- 4. REPACK: Implode back to Dictionary ---
-        """
-        def repack_row(row):
-            d = {}
-            for lid in tracked_ids:
-                col_x = f'lm_{lid}_x'
-                col_y = f'lm_{lid}_y'
-                
-                # Only add if interpolation resulted in valid numbers
-                if pd.notna(row.get(col_x)) and pd.notna(row.get(col_y)):
-                    d[lid] = (row[col_x], row[col_y])
-            return d
-
-        # Recreate the landmarks column
-        df_merged['landmarks'] = df_merged.apply(repack_row, axis=1)
-        
-        # Clean up: keep only original columns + interpolated landmarks
-        final_cols = [c for c in df.columns if c in df_merged.columns]"""""
-        return df_merged#[final_cols]
+        return df_merged
     
     # -------------------------------------------------------------------------
     # --- SEGMENTATION --------------------------------------------------------
@@ -637,6 +732,56 @@ class LandmarksProcessor:
             df[col_name] = values
 
         # 4. Cleanup: Drop the original unsmoothed columns
+        return df.drop(columns=coord_cols)
+
+
+    def smooth(self, df, median_kernel=3):
+        """
+        Applies a hybrid filter: 
+        1. Median filter to remove impulsive outliers (MediaPipe glitches).
+        2. Savitzky–Golay smoothing to reduce high-frequency jitter.
+        """
+        df = df.copy()
+
+        # Determine Savgol window size (must be odd)
+        window = self.smoothing_window
+        if window % 2 == 0:
+            window += 1
+
+        # Identify all coordinate columns
+        coord_cols = [c for c in df.columns if c.startswith('lm_')] + ['cx', 'cy']
+        
+        if not coord_cols:
+            return df
+
+        # Prepare a list to store smoothed values
+        smoothed_data = {f"{col}_smooth": np.full(len(df), np.nan) for col in coord_cols}
+
+        # Iterate through segments
+        for seg_id, seg in df.groupby("segment_id"):
+            if len(seg) >= window:
+                for col in coord_cols:
+                    # --- STEP 1: Median Filtering ---
+                    # This removes the "188.0" outliers before they can ruin the Savgol fit
+                    interim_signal = medfilt(seg[col], kernel_size=median_kernel)
+
+                    # --- STEP 2: Savitzky-Golay Smoothing ---
+                    smoothed_values = savgol_filter(
+                        interim_signal, 
+                        window_length=window, 
+                        polyorder=self.smoothing_poly, 
+                        mode="interp"
+                    )
+                    smoothed_data[f"{col}_smooth"][seg.index] = smoothed_values
+            else:
+                # If segment is too short, just copy the original data
+                for col in coord_cols:
+                    smoothed_data[f"{col}_smooth"][seg.index] = seg[col].values
+
+        # Update the DataFrame
+        for col_name, values in smoothed_data.items():
+            df[col_name] = values
+
         return df.drop(columns=coord_cols)
 
     # -------------------------------------------------------------------------
