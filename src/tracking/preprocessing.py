@@ -823,7 +823,7 @@ class LandmarksProcessor:
 
         # use only selected landmarks
         df['landmarks'] = df['landmarks'].apply(
-            lambda lms: {lm['id']: (round(lm['coord'][0] * 1920, 1), round(lm['coord'][1] * 1080, 1)) for lm in lms if lm['id'] in landmarks} if lms is not None else None
+            lambda lms: {lm['id']: (round(lm['coord'][0] * 1920, 2), round(lm['coord'][1] * 1080, 2)) for lm in lms if lm['id'] in landmarks} if lms is not None else None
         )
 
         df = self.swap_labels(df)
