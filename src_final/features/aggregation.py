@@ -1,6 +1,6 @@
 import numpy as np
 
-def aggregate_window_features(df_windows):
+def aggregate_window_features(df_windows, p=90):
     """
     Aggregates window-level features into video-level descriptors, 
     separating 'Decision Time' (Idle) from 'Execution Quality' (Active).
@@ -42,8 +42,8 @@ def aggregate_window_features(df_windows):
     feats_error = [c for c in feats_error if c in df_active.columns]
 
     # helper for clean names
-    def p90(x): return np.percentile(x, 90)
-    def p10(x): return np.percentile(x, 10)
+    def p90(x): return np.percentile(x, p)
+    def p10(x): return np.percentile(x, 100-p)
     
     aggs = {}
     

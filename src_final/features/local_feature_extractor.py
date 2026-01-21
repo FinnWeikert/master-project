@@ -99,12 +99,12 @@ class WindowFeatureExtractor:
         pts17 = get_pts("lm_17") # Pinky Base
 
         # Velocity & Accel
-        v_vec = np.diff(pts0, axis=0, prepend=pts0[:1]) / self.dt
-        a_vec = np.diff(v_vec, axis=0, prepend=v_vec[:1]) / self.dt
+        v_vec = np.gradient(pts0, axis=0) / self.dt
+        a_vec = np.gradient(v_vec, axis=0) / self.dt
         
         # Speed & Path
-        d = np.sqrt(np.sum(np.diff(pts0, axis=0)**2, axis=1))
-        d = np.concatenate(([0], d))
+        # Path distance per frame
+        d = np.sqrt(np.sum(np.diff(pts0, axis=0, prepend=pts0[:1])**2, axis=1))
         
         # Orientation (Wrist -> Index)
         v_orient = pts5 - pts0
@@ -129,7 +129,9 @@ class WindowFeatureExtractor:
         
         # Basic Metadata
         feats['total_path'] = np.sum(win['d'])
-        feats['is_idle'] = 1.0 if feats['total_path'] < 25 else 0.0
+        
+        # idle defined as less the 0.33 movement change per frame => total_path / num_frames (window_size) < 1/3
+        feats['is_idle'] = 1.0 if (feats['total_path']/self.window_size) < (1 / 3) else 0.0
 
         # Feature Groups
         feats.update(self._feat_translation(win))
@@ -165,7 +167,7 @@ class WindowFeatureExtractor:
             f['curvature'] = 0.0 # Straight line assumption if stationary
 
         # Reversals
-        f['num_reversals'] = self._count_reversals(win['vx'], win['vy'])
+        #f['num_reversals'] = self._count_reversals(win['vx'], win['vy'])
         
         # Velocity Stats
         v_mag = np.sqrt(v_mag_sq)
@@ -202,7 +204,7 @@ class WindowFeatureExtractor:
         dim_jerk = (int_sq_jerk * (duration**3)) / (v_peak**2)
         dim_jerk = -np.log1p(dim_jerk) if self.log_transform else dim_jerk
 
-        return {'log_dim_jerk': dim_jerk} # Negative log often used so Higher = Smoother
+        return {'dim_jerk': dim_jerk} # Negative log often used so Higher = Smoother
 
     def _feat_rotation(self, win):
         return {

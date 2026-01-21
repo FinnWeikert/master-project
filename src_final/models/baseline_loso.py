@@ -31,6 +31,9 @@ def evaluate_loso_model(
     use_pca = pca_components is not None and len(pca_components) > 0
     all_cols = primary_features + extra_features
 
+    all_fold_weights = []
+    feature_names = ['bias'] + primary_features + extra_features
+
     iterator = tqdm(unique_surgeons, desc="LOSOCV Folds") if verbose else unique_surgeons
 
     for surgeon_out in iterator:
@@ -74,6 +77,7 @@ def evaluate_loso_model(
 
         # 4. Optional PCA on Primary Features
         if use_pca:
+            feature_names = ['bias'] + [f"PC{idx+1}" for idx in pca_components] + extra_features
             pca = PCA(n_components=max(pca_components) + 1)
             X_train_pca = pca.fit_transform(X_train_prim)
             X_test_pca = pca.transform(X_test_prim)
@@ -91,6 +95,14 @@ def evaluate_loso_model(
         # 6. Train & Predict
         model = model_class(**model_params)
         model.fit(X_train_final, y_train)
+
+        # capture weights
+        if isinstance(model.intercept_, float):  # single feature case
+            intercept_and_coef = np.concatenate([[model.intercept_], model.coef_])
+        else:
+            intercept_and_coef = np.concatenate((model.intercept_, model.coef_[0]))
+        all_fold_weights.append(intercept_and_coef)
+        
         y_pred = model.predict(X_test_final)
 
         # 7. Metrics
@@ -110,18 +122,31 @@ def evaluate_loso_model(
     overall_std = np.std(np.abs(np.array(all_true) - np.array(all_preds)))
     overall_corr, _ = spearmanr(all_true, all_preds)
     overall_r2 = r2_score(all_true, all_preds)
-    
+    adjusted_r2 = 1 - (1 - overall_r2) * (len(all_true) - 1) / (len(all_true) - len(feature_names) - 1)
+
     summary = {
         'Overall_MAE': overall_mae,
         'Overall_MAE_STD': overall_std,
         'Overall_Spearman_R': overall_corr,
-        'Overall_R2': overall_r2
+        'Overall_R2': overall_r2,
+        'Overall_Adj_R2': adjusted_r2
     }
-    
+
+    avg_weights = np.mean(all_fold_weights, axis=0)
+    std_weights = np.std(all_fold_weights, axis=0)
+
+    weight_report = pd.DataFrame({
+        'Feature': feature_names,
+        'Average_Weight': avg_weights,
+        'Std_Weight': std_weights
+    })
+
     if verbose:
         scaling_type = f"By Case ({case_col})" if scale_by_case else "Global"
         print(f"\n=== LOSOCV Results ({scaling_type} Scaling) ===")
-        print(f"R: {overall_corr:.4f} | MAE: {overall_mae:.4f} | MAE STD: {overall_std:.4f} | R2: {overall_r2:.4f}")
+        print(f"R: {overall_corr:.4f} | MAE: {overall_mae:.4f} | MAE STD: {overall_std:.4f} | R2: {overall_r2:.4f} | Adj R2: {adjusted_r2:.4f}")
+        print("\nFeature Weights:")
+        print(weight_report)
     
     plot_loso_results(predictions_df, title=f"LOSOCV: {model_class.__name__} | Scaling: {scaling_type}")
     
