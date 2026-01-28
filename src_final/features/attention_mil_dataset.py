@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 
 class AttentionMILDataset(Dataset):
-    def __init__(self, df_window_features, df_global_features, feature_cols, global_feature_cols, label_col):
+    def __init__(self, df_window_features, df_global_features, feature_cols, global_feature_cols, label_col='QRS_Overal'):
         """
         df_features: DataFrame with window-level features and labels
         feature_cols: List of columns to use as local features (windows)
@@ -29,7 +29,7 @@ class AttentionMILDataset(Dataset):
             df_vid = df_window_features[df_window_features['video_id'] == vid]
             bag = df_vid[feature_cols].values.astype(np.float32)
             global_feat = df_global_features[df_global_features['video_id'] == vid][global_feature_cols].iloc[0].values.astype(np.float32)
-            label = df_vid[label_col].iloc[0].astype(np.float32)
+            label = df_global_features[df_global_features['video_id'] == vid][label_col].iloc[0].astype(np.float32)
             
             self.bags.append(bag)
             self.global_features.append(global_feat)
@@ -45,3 +45,16 @@ class AttentionMILDataset(Dataset):
         vid_id = self.video_ids[idx]
 
         return torch.from_numpy(bag), torch.from_numpy(global_feat), torch.tensor(label), vid_id
+    
+
+def mil_collate_fn(batch):
+    """
+    Custom collate function to handle variable-sized bags.
+    Batch is a list of tuples: [(bag, global_feat, label, vid_id), ...]
+    """
+    bags = [item[0] for item in batch]        # List of Tensors (variable size)
+    global_feats = torch.stack([item[1] for item in batch]) # Stacked Tensor (Batch, D_global)
+    labels = torch.stack([item[2] for item in batch])  # Stacked Tensor (Batch, )
+    vid_ids = [item[3] for item in batch]     # List of IDs
+    
+    return bags, global_feats, labels, vid_ids
