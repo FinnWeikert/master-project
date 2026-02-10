@@ -7,6 +7,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, r2_score
 from scipy.stats import pearsonr, spearmanr
 from tqdm import tqdm
+from src_final.models.analysis import NestedFeatureSelector
+from src_final.models.mlp_regressor import PyTorchMLPEnsemble
 
 def evaluate_loso_model(
     df,
@@ -32,6 +34,8 @@ def evaluate_loso_model(
     use_pca = pca_components is not None and len(pca_components) > 0
     all_cols = primary_features + extra_features
 
+    all_cols_to_scale = [col for col in all_cols if 'case' not in col.lower()]  # Exclude case identifier columns
+
     all_fold_weights = []
     feature_names = ['bias'] + primary_features + extra_features
 
@@ -50,6 +54,8 @@ def evaluate_loso_model(
 
         # 2. Scaling Logic
         if scale_by_case and case_col in df.columns:
+            # Cast columns to float to avoid dtype warnings during scaling
+            df[all_cols_to_scale] = df[all_cols_to_scale].astype(float)
             # --- CASE-WISE STANDARDIZATION ---
             # Standardize training data within each case
             for case in df_train[case_col].unique():
@@ -58,17 +64,17 @@ def evaluate_loso_model(
                 
                 scaler = StandardScaler()
                 # Fit on training surgeons for this specific case
-                df_train.loc[case_train_idx, all_cols] = scaler.fit_transform(df_train.loc[case_train_idx, all_cols])
+                df_train.loc[case_train_idx, all_cols_to_scale] = scaler.fit_transform(df_train.loc[case_train_idx, all_cols_to_scale])
                 
                 # Apply that case-specific scaler to the test surgeon
                 if not df_test.loc[case_test_idx].empty:
-                    df_test.loc[case_test_idx, all_cols] = scaler.transform(df_test.loc[case_test_idx, all_cols])
+                    df_test.loc[case_test_idx, all_cols_to_scale] = scaler.transform(df_test.loc[case_test_idx, all_cols_to_scale])
         
         elif scale_features:
             # --- GLOBAL STANDARDIZATION ---
             scaler = StandardScaler()
-            df_train[all_cols] = scaler.fit_transform(df_train[all_cols])
-            df_test[all_cols] = scaler.transform(df_test[all_cols])
+            df_train[all_cols_to_scale] = scaler.fit_transform(df_train[all_cols_to_scale])
+            df_test[all_cols_to_scale] = scaler.transform(df_test[all_cols_to_scale])
 
         # 3. Prepare Feature Matrices
         X_train_prim = df_train[primary_features].values
@@ -222,6 +228,7 @@ def evaluate_loso_mlp_ensemble(
     fold_metrics = {}
     use_pca = pca_components is not None and len(pca_components) > 0
     all_cols = primary_features + extra_features
+    all_cols_to_scale = [col for col in all_cols if 'case' not in col.lower()]  # Exclude case identifier columns
 
     iterator = tqdm(unique_surgeons, desc="LOSOCV Ensemble Folds") if verbose else unique_surgeons
 
@@ -245,13 +252,13 @@ def evaluate_loso_mlp_ensemble(
                 case_train_idx = df_train[df_train[case_col] == case].index
                 case_test_idx = df_test[df_test[case_col] == case].index
                 scaler = StandardScaler()
-                df_train.loc[case_train_idx, all_cols] = scaler.fit_transform(df_train.loc[case_train_idx, all_cols])
+                df_train.loc[case_train_idx, all_cols_to_scale] = scaler.fit_transform(df_train.loc[case_train_idx, all_cols_to_scale])
                 if not df_test.loc[case_test_idx].empty:
-                    df_test.loc[case_test_idx, all_cols] = scaler.transform(df_test.loc[case_test_idx, all_cols])
+                    df_test.loc[case_test_idx, all_cols_to_scale] = scaler.transform(df_test.loc[case_test_idx, all_cols_to_scale])
         elif scale_features:
             scaler = StandardScaler()
-            df_train[all_cols] = scaler.fit_transform(df_train[all_cols])
-            df_test[all_cols] = scaler.transform(df_test[all_cols])
+            df_train[all_cols_to_scale] = scaler.fit_transform(df_train[all_cols_to_scale])
+            df_test[all_cols_to_scale] = scaler.transform(df_test[all_cols_to_scale])
 
         # 3. Prepare Feature Matrices
         X_train_prim = df_train[primary_features].values
@@ -328,5 +335,128 @@ def evaluate_loso_mlp_ensemble(
     return summary, fold_results_df, predictions_df
 
 
+def run_nested_loso(
+    df,
+    primary_features,     # To be compressed into PC1
+    candidate_features,   # To be selected via Partial R2
+    extra_features=None,  # Included without selection (e.g. Case IDs)
+    target_col='QRS_Overal',
+    surgeon_col='Participant Number',
+    case_col='Case_Number',
+    model_type='ridge',   # 'ridge' or 'mlp'
+    model_params=None,
+    top_n=2,
+    pr2_threshold=0.05,
+    corr_threshold=0.75,
+    scale_by_case=False,
+    print_fold_metrics=True
+):
+    if extra_features is None: extra_features = []
+    if model_params is None: model_params = {}
+    
+    unique_surgeons = df[surgeon_col].unique()
+    selector = NestedFeatureSelector(top_n=top_n, pr2_threshold=pr2_threshold, corr_threshold=corr_threshold)
+    
+    all_preds, all_true, all_surgeons = [], [], []
+    all_preds_train, all_true_train = [], []
+    selection_history = [] # To track stability
 
+    for surgeon_out in unique_surgeons:#tqdm(unique_surgeons, desc=f"Nested LOSO ({model_type})"):
+        # --- 1. Split ---
+        train_idx = df[df[surgeon_col] != surgeon_out].index
+        test_idx = df[df[surgeon_col] == surgeon_out].index
+        
+        df_train = df.loc[train_idx].copy()
+        df_test = df.loc[test_idx].copy()
+        
+        # --- 2. Scale ---
+        cols_to_scale = primary_features + candidate_features
+        # Only scale the extra features that aren't dummy/categorical
+        scale_extras = [c for c in extra_features if df[c].nunique() > 2]
+        cols_to_scale += scale_extras
 
+        if scale_by_case:
+            for case in df[case_col].unique():
+                c_tr = df_train[df_train[case_col] == case].index
+                c_te = df_test[df_test[case_col] == case].index
+                if len(c_tr) > 0:
+                    scaler = StandardScaler()
+                    df_train.loc[c_tr, cols_to_scale] = scaler.fit_transform(df_train.loc[c_tr, cols_to_scale])
+                    if len(c_te) > 0:
+                        df_test.loc[c_te, cols_to_scale] = scaler.transform(df_test.loc[c_te, cols_to_scale])
+        else:
+            scaler = StandardScaler()
+            df_train[cols_to_scale] = scaler.fit_transform(df_train[cols_to_scale])
+            df_test[cols_to_scale] = scaler.transform(df_test[cols_to_scale])
+
+        # --- 3. Baseline Preparation (PC1 + Extras) ---
+        pca = PCA(n_components=1)
+        pc1_train = pca.fit_transform(df_train[primary_features])
+        pc1_test = pca.transform(df_test[primary_features])
+        
+        X_tr_base = np.hstack([pc1_train, df_train[extra_features].values])
+        X_te_base = np.hstack([pc1_test, df_test[extra_features].values])
+
+        # --- 4. Nested Selection ---
+        selected_candidates, selected_pr2s = selector.select_features(
+            X_tr_base, df_train[target_col].values, df_train[candidate_features]
+        )
+        selection_history.append({'Surgeon_Out': surgeon_out, 'Selected': selected_candidates})
+
+        # --- 5. Final Feature Matrix Assembly ---
+        X_train_final = np.hstack([X_tr_base, df_train[selected_candidates].values])
+        X_test_final = np.hstack([X_te_base, df_test[selected_candidates].values])
+        
+        y_train = df_train[target_col].values
+        y_test = df_test[target_col].values
+
+        # --- 6. Model Training ---
+        if model_type == 'ridge':
+            model = Ridge(alpha=model_params.get('alpha', 0.5))
+            model.fit(X_train_final, y_train)
+            preds = model.predict(X_test_final)
+            preds_train = model.predict(X_train_final)
+        
+        elif model_type == 'mlp':
+            # Handle Score Scaling for MLP
+            y_scaler = StandardScaler()
+            y_tr_scaled = y_scaler.fit_transform(y_train.reshape(-1, 1))
+            
+            # Assuming PyTorchMLPEnsemble is imported and available
+            model = PyTorchMLPEnsemble(input_dim=X_train_final.shape[1], **model_params)
+            model.fit(X_train_final, y_tr_scaled)
+            
+            preds_scaled = model.predict(X_test_final)
+            preds = y_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
+
+            preds_train_scaled = model.predict(X_train_final)
+            preds_train = y_scaler.inverse_transform(preds_train_scaled.reshape(-1, 1)).flatten()
+
+        fold_mae = mean_absolute_error(y_test, preds)
+        fold_train_mae = mean_absolute_error(y_train, preds_train)
+
+        all_preds.extend(preds)
+        all_true.extend(y_test)
+        all_preds_train.extend(preds_train)
+        all_true_train.extend(y_train)
+        all_surgeons.extend([surgeon_out] * len(y_test))
+
+        if print_fold_metrics:
+            print(f"Surgeon {surgeon_out} | Train MAE: {fold_train_mae:.4f} | Test MAE: {fold_mae:.4f} | Selected Features: {selected_candidates} | Selected PR2s: {[round(pr2,4) for pr2 in selected_pr2s]}")
+
+    # --- 7. Aggregation & Reporting ---
+    results_df = pd.DataFrame({'Surgeon_ID': all_surgeons, 'True': all_true, 'Pred': all_preds})
+    stability_df = pd.DataFrame(selection_history)
+    
+    # Calculate Stability Statistics for the Thesis Table
+    all_selected = [item for sublist in stability_df['Selected'] for item in sublist]
+    stability_stats = pd.Series(all_selected).value_counts() / len(unique_surgeons)
+    
+    print(f"\n=== Nested LOSO Summary ({model_type}) ===")
+    print(f"MAE: {mean_absolute_error(all_true, all_preds):.4f} +/- {np.std(np.abs(np.array(all_true) - np.array(all_preds))):.4f}")
+    print(f"Train MAE: {mean_absolute_error(all_true_train, all_preds_train):.4f}")
+    print(f"Spearman R: {spearmanr(all_true, all_preds)[0]:.4f}")
+    print("\nFeature Selection Stability:")
+    print(stability_stats)
+    
+    return results_df, stability_stats

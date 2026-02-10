@@ -126,6 +126,7 @@ def leakage_free_residual_analysis(
         # so we can predict residuals for the whole dataset later.
         scaler = StandardScaler()
         cols_to_scale = pca_features + base_features + candidate_features
+        cols_to_scale = [col for col in cols_to_scale if 'case' not in col.lower()]  # Exclude case identifier columns
         
         # Create a copy for this fold to avoid overwriting global data
         df_fold = df_clean.copy()
@@ -261,3 +262,77 @@ def leakage_free_residual_analysis(
         return final_summary.sort_values('Shuffled_R2_mean', ascending=False)
     else:
         return final_summary.sort_values('Partial_R2_mean', ascending=False)
+    
+
+
+
+
+
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, r2_score
+from scipy.stats import spearmanr, pearsonr
+from tqdm import tqdm
+
+class NestedFeatureSelector:
+    """
+    Handles the 'Fair' selection of features within a single LOSO fold.
+    Uses the Partial R2 logic + Redundancy Filtering.
+    """
+    def __init__(self, top_n=2, pr2_threshold=0.05, corr_threshold=0.75):
+        self.top_n = top_n
+        self.pr2_threshold = pr2_threshold
+        self.corr_threshold = corr_threshold
+
+    def select_features(self, X_train_baseline, y_train, candidate_df):
+        """
+        X_train_baseline: The [PC1, CaseIDs] matrix
+        y_train: Target scores
+        candidate_df: DataFrame of window features (already scaled)
+        """
+        # 1. Get Baseline Residuals
+        base_model = Ridge(alpha=0.5)
+        base_model.fit(X_train_baseline, y_train)
+        base_resid_var = np.var(y_train - base_model.predict(X_train_baseline))
+
+        candidate_results = []
+        for col in candidate_df.columns:
+            # Fit Combined Model: Baseline + Current Candidate
+            X_combined = np.hstack([X_train_baseline, candidate_df[col].values.reshape(-1, 1)])
+            comb_model = Ridge(alpha=0.5)
+            comb_model.fit(X_combined, y_train)
+            comb_resid_var = np.var(y_train - comb_model.predict(X_combined))
+            
+            # Partial R2
+            pr2 = 1 - (comb_resid_var / (base_resid_var + 1e-9))
+            candidate_results.append({'name': col, 'pr2': pr2})
+
+        # 2. Sort by Partial R2
+        ranked = sorted(candidate_results, key=lambda x: x['pr2'], reverse=True)
+
+        # 3. Filter & Redundancy Check
+        selected_names = []
+        selected_pr2s = []
+        for entry in ranked:
+            if len(selected_names) >= self.top_n:
+                break
+            
+            if entry['pr2'] < self.pr2_threshold:
+                continue
+            
+            # Check correlation with already selected candidates
+            is_redundant = False
+            for s_name in selected_names:
+                c, _ = pearsonr(candidate_df[entry['name']], candidate_df[s_name])
+                if abs(c) > self.corr_threshold:
+                    is_redundant = True
+                    break
+            
+            if not is_redundant:
+                selected_names.append(entry['name'])
+                selected_pr2s.append(entry['pr2'])
+                
+        return selected_names, selected_pr2s

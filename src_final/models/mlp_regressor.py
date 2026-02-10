@@ -7,11 +7,12 @@ from collections import deque
 from sklearn.base import BaseEstimator, RegressorMixin
 
 class PyTorchMLPEnsemble(BaseEstimator, RegressorMixin):
-    def __init__(self, input_dim, hidden_dim=16, dropout=0.1, lr=5e-4, 
+    def __init__(self, input_dim, hidden_dim=16, n_hidden=1, dropout=0.1, lr=5e-4, 
                  max_epochs=1000, batch_size=10, weight_decay=1e-4, 
                  n_models=4, patience=50, avg_window=50, device='cpu'):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.n_hidden = n_hidden
         self.dropout = dropout
         self.lr = lr
         self.max_epochs = max_epochs
@@ -25,12 +26,11 @@ class PyTorchMLPEnsemble(BaseEstimator, RegressorMixin):
 
     def _build_single_model(self, seed):
         torch.manual_seed(seed) # Ensure different init for each ensemble member
-        return nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.hidden_dim, 1)
-        ).to(self.device)
+        layers = [nn.Linear(self.input_dim, self.hidden_dim), nn.LeakyReLU(0.01), nn.Dropout(self.dropout)]
+        for _ in range(self.n_hidden - 1):
+            layers.extend([nn.Linear(self.hidden_dim, (self.hidden_dim)//2), nn.LeakyReLU(0.01), nn.Dropout(self.dropout)])
+        layers.append(nn.Linear((self.hidden_dim)//(2**(self.n_hidden-1)), 1))
+        return nn.Sequential(*layers).to(self.device)
 
     def fit(self, X, y):
         self.models_ = []

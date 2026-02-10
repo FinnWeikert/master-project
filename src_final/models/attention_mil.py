@@ -7,23 +7,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class HybridAttentionMIL(nn.Module):
-    def __init__(self, local_dim=7, global_dim=2, attention_hidden_dim=16, 
-                 mlp_hidden_dim=16, dropout=0.25, use_feature_extractor=True):
+    def __init__(self, local_dim=1, global_dim=2, attention_hidden_dim=4, 
+                 mlp_hidden_dim=4, dropout=0.25, use_feature_extractor=False,
+                 temperature=0.1): # <--- Added temperature
         super().__init__()
+        self.temperature = temperature
         
-        # --- 1. Optional Local Feature Extractor ---
-        # If False, this layer simply passes the data through unchanged.
         if use_feature_extractor:
             self.feature_extractor = nn.Sequential(
                 nn.Linear(local_dim, local_dim),
                 nn.ReLU(),
-                nn.Dropout(dropout) # Regularize the new parameters
+                nn.Dropout(dropout)
             )
         else:
             self.feature_extractor = nn.Identity()
 
-        # --- 2. Attention Mechanism (Gated) ---
-        # Note: Input is still local_dim because our extractor doesn't change size
         self.attention_V = nn.Sequential(
             nn.Linear(local_dim, attention_hidden_dim),
             nn.Tanh()
@@ -34,7 +32,6 @@ class HybridAttentionMIL(nn.Module):
         )
         self.attention_weights = nn.Linear(attention_hidden_dim, 1)
 
-        # --- 3. Regression Head ---
         fusion_dim = local_dim + global_dim
         self.regressor = nn.Sequential(
             nn.Linear(fusion_dim, mlp_hidden_dim),
@@ -53,8 +50,7 @@ class HybridAttentionMIL(nn.Module):
                     nn.init.constant_(m.bias, 0)
     
     def forward(self, bag, global_feat, ablation=None):
-        # A. Process local features (either Identity or Learned transformation)
-        # bag: (N, local_dim)
+        # A. Process local features
         bag_processed = self.feature_extractor(bag) 
 
         # B. Calculate Attention
@@ -63,7 +59,11 @@ class HybridAttentionMIL(nn.Module):
         G = V * U               
         
         A_raw = self.attention_weights(G) 
-        alpha = F.softmax(A_raw, dim=0) 
+        
+        # --- TEMPERATURE SCALING ---
+        # Dividing by T < 1 makes the softmax "sharper" (more peaky)
+        # Dividing by T > 1 makes it "flatter" (more uniform)
+        alpha = F.softmax(A_raw / self.temperature, dim=0) 
         
         # C. Aggregate Bag (Weighted Sum)
         bag_embedding = torch.matmul(alpha.T, bag_processed) 
@@ -74,7 +74,8 @@ class HybridAttentionMIL(nn.Module):
             global_feat = torch.zeros_like(global_feat)
         
         # D. Fusion & Prediction
-        fused = torch.cat([bag_embedding, global_feat], dim=1)
+        # Ensure correct shapes for concatenation (1, feat_dim)
+        fused = torch.cat([bag_embedding, global_feat.view(1, -1)], dim=1)
         score = self.regressor(fused)
         
         return score, alpha
@@ -281,7 +282,7 @@ from collections import deque
 
 def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3, 
                           device="cpu", score_scaler=None, patience=50, 
-                          verbose=True, ablation=None, use_weight_averaging=True, avg_window=20):
+                          verbose=True, ablation=None, use_weight_averaging=True, avg_window=20, train_mae_threshold=4.4):
     
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
@@ -344,10 +345,14 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
+
+            if best_train_mae < train_mae_threshold:
+                break
             
         if epochs_no_improve >= patience:
             print(f"\n[Terminated] Training converged at epoch {epoch+1}.")
             break
+        
 
     # 7. Apply Weight Averaging
     if use_weight_averaging and len(state_buffer) > 1:
@@ -389,7 +394,7 @@ def run_nested_training(
     lr=1e-3,
     patience=50,
     device="cpu",
-    score_scaler=None
+    score_scaler=None,
 ):
     """
     Performs 'Honest' training by splitting the training pool into 

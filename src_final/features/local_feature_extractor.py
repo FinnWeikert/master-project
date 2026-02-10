@@ -10,7 +10,8 @@ class WindowFeatureExtractor:
         step_sec=0.5,
         orig_fps=30.0,
         log_transform=False,
-        include_bimanual=False
+        include_bimanual=False,
+        exclude_idle=False
     ):
         self.hand = hand
         self.other_hand = "Left" if hand == "Right" else "Right"
@@ -20,6 +21,7 @@ class WindowFeatureExtractor:
         self.step_size = int(step_sec * self.orig_fps)
         self.log_transform = log_transform
         self.include_bimanual = include_bimanual
+        self.exclude_idle=exclude_idle
 
     def extract_features(self, df_dict):
         all_window_rows = []
@@ -82,7 +84,9 @@ class WindowFeatureExtractor:
                     
                     feats['video_id'] = video_id
                     feats['window_start_frame'] = df_seg.iloc[start]['frame']
-                    all_window_rows.append(feats)
+
+                    if not self.exclude_idle or feats['is_idle'] == 0:
+                        all_window_rows.append(feats)
 
         return pd.DataFrame(all_window_rows)
 
