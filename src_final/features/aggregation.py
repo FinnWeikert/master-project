@@ -1,6 +1,6 @@
 import numpy as np
 
-def aggregate_window_features(df_windows, p=90):
+def aggregate_window_features(df_windows, p=90, active_with_idle=True):
     """
     Aggregates window-level features into video-level descriptors, 
     separating 'Decision Time' (Idle) from 'Execution Quality' (Active).
@@ -15,20 +15,23 @@ def aggregate_window_features(df_windows, p=90):
     # --- 2. Global Economy (The "Hesitation" Signal) ---
     # We use the whole dataframe (Idle + Active) for this
     df_economy = df_windows.groupby('video_id')['is_idle'].agg(
-        idle_prop='mean',       # % of time spent waiting
-        idle_switch_count='sum' # How many times did they stop and start? (Hesitancy)
+        idle_prop='mean'      # % of time spent waiting
     )
 
     # --- 3. Active Kinematics (The "Skill" Signal) ---
     # Filter for active windows only
-    df_active = df_windows[df_windows['is_idle'] == 0].copy()
+    if not active_with_idle:
+        df_active = df_windows[df_windows['is_idle'] == 0].copy()
+    else:
+        df_active = df_windows.copy()
     
     # Define aggregation strategies based on feature type
     # A. Magnitude Features (Where the 'Average' matters)
     #    Velocity, Spacing, Ang Velocity
-    feats_magnitude = [
+    possible_feats = [
         'vel_mean', 'vel_p90', 'spatial_spread', 
-        'ang_vel_mean', 'bimanual_dist_mean', 'bimanual_dist_std', 'bimanual_sync'
+        'ang_vel_mean', 'bimanual_dist_mean', 'bimanual_dist_std', 'bimanual_sync',
+        'jerk', 'curvature', 'path_ratio', 'num_reversals', 'palm_area_cv', 'bimanual_imbalance'
     ]
     
     # B. Error Features (Where the 'Worst Case' matters)
@@ -38,22 +41,28 @@ def aggregate_window_features(df_windows, p=90):
     ]
     
     # Filter lists to ensure columns actually exist
-    feats_magnitude = [c for c in feats_magnitude if c in df_active.columns]
-    feats_error = [c for c in feats_error if c in df_active.columns]
+    feats = [c for c in possible_feats if c in df_active.columns]
 
     # helper for clean names
-    def p90(x): return np.percentile(x, p)
-    def p10(x): return np.percentile(x, 100-p)
+    def make_percentile_funcs(p):
+        def high(x):
+            return np.percentile(x, p)
+        def low(x):
+            return np.percentile(x, 100-p)
+
+        high.__name__ = f"p{p}"
+        low.__name__  = f"p{100-p}"
+
+        return high, low
+
+
+    p_high, p_low = make_percentile_funcs(p)
+
     
     aggs = {}
     
-    # For Magnitudes: Median (Robust Average), Std (Consistency), P90 (Peak Capacity)
-    for f in feats_magnitude:
-        aggs[f] = ['median', 'std', p90]
-
-    # For Errors: Median (Typical), P90 (High Error), Max (Catastrophic Error)
-    for f in feats_error:
-        aggs[f] = ['median', 'std', p90, 'max']
+    for f in feats:
+        aggs[f] = ['median', 'std', p_high, p_low]
 
     df_kinematics = df_active.groupby('video_id').agg(aggs)
     

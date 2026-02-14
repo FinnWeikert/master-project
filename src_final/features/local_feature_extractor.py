@@ -156,8 +156,10 @@ class WindowFeatureExtractor:
         # Path Ratio
         start_pt, end_pt = win['pts0'][0], win['pts0'][-1]
         euclidean = np.sqrt(np.sum((end_pt - start_pt)**2))
-        path_ratio = np.sum(win['d']) / (euclidean + 1e-6)
+        path_ratio = np.sum(win['d']) / (euclidean + 1)#1e-6
         f['path_ratio'] = np.log1p(path_ratio) if self.log_transform else path_ratio
+        if path_ratio > 200:
+            d=1
 
         # Curvature
         v_mag_sq = win['vx']**2 + win['vy']**2
@@ -166,7 +168,7 @@ class WindowFeatureExtractor:
         valid_mask = v_mag_sq > 20.0 
         if np.sum(valid_mask) > 5:
             k = cross[valid_mask] / (v_mag_sq[valid_mask]**1.5)
-            f['curvature'] = np.mean(k)
+            f['curvature'] = np.log1p(np.mean(k)) if self.log_transform else np.mean(k)
         else:
             f['curvature'] = 0.0 # Straight line assumption if stationary
 

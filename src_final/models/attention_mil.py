@@ -1,10 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pandas as pd
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class HybridAttentionMIL(nn.Module):
     def __init__(self, local_dim=1, global_dim=2, attention_hidden_dim=4, 
@@ -16,7 +14,7 @@ class HybridAttentionMIL(nn.Module):
         if use_feature_extractor:
             self.feature_extractor = nn.Sequential(
                 nn.Linear(local_dim, local_dim),
-                nn.ReLU(),
+                nn.LeakyReLU(),
                 nn.Dropout(dropout)
             )
         else:
@@ -81,6 +79,80 @@ class HybridAttentionMIL(nn.Module):
         return score, alpha
     
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from collections import deque
+import numpy as np
+
+class HybridAttentionMIL_new(nn.Module):
+    def __init__(self, local_dim, global_dim, attention_hidden_dim=8, 
+                 mlp_hidden_dim=8, dropout=0.25, temperature=0.1):
+        super().__init__()
+        self.temperature = temperature
+        
+        # 1. Normalization layers to stabilize attention
+        self.local_norm = nn.LayerNorm(local_dim)
+        self.global_norm = nn.LayerNorm(global_dim)
+
+        # 2. Gated Attention Mechanism
+        self.attention_V = nn.Sequential(
+            nn.Linear(local_dim, attention_hidden_dim),
+            nn.Tanh()
+        )
+        self.attention_U = nn.Sequential(
+            nn.Linear(local_dim, attention_hidden_dim),
+            nn.Sigmoid()
+        )
+        self.attention_weights = nn.Linear(attention_hidden_dim, 1)
+
+        # 3. Final Regressor (Fusion)
+        fusion_dim = local_dim + global_dim
+        self.regressor = nn.Sequential(
+            nn.Linear(fusion_dim, mlp_hidden_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, 1)
+        )
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, bag, global_feat, ablation=None):
+        # Normalize inputs to stabilize gradients
+        bag = self.local_norm(bag)
+        global_feat = self.global_norm(global_feat)
+
+        # Calculate Attention
+        V = self.attention_V(bag) 
+        U = self.attention_U(bag) 
+        G = V * U               
+        
+        A_raw = self.attention_weights(G) 
+        
+        # Softmax with temperature and a small epsilon for numerical stability
+        alpha = F.softmax(A_raw / self.temperature, dim=0) + 1e-10
+        alpha = alpha / alpha.sum() 
+        
+        # Aggregate Bag (Weighted Sum)
+        bag_embedding = torch.matmul(alpha.T, bag) # (1, local_dim)
+
+        if ablation == 'global_only':
+            bag_embedding = torch.zeros_like(bag_embedding)
+        elif ablation == 'mil_only':
+            global_feat = torch.zeros_like(global_feat)
+        
+        # Fusion & Prediction
+        fused = torch.cat([bag_embedding, global_feat.view(1, -1)], dim=1)
+        score = self.regressor(fused)
+        
+        return score, alpha
 
 
 ########### Training Functions ###########
@@ -139,9 +211,11 @@ def train_one_epoch(model, loader, optimizer, criterion, device, score_scaler=No
     # Calculate real-world metrics
     errors = np.abs(preds_arr - labels_arr)
     mae = np.mean(errors)
-    std = np.std(errors)
+
+    max_alpha_feature_dist = pd.DataFrame(max_alpha_feat_windows, columns=[f"feat_{i}" for i in range(bag.shape[1])]).describe()
+    alpha_ratios_dist = pd.Series(alpha_ratios).describe()
         
-    return loss, mae, std
+    return loss, mae, max_alpha_feature_dist, alpha_ratios_dist
 
 def validate_one_epoch(model, loader, criterion, device, label_scaler=None, ablation=None):
     model.eval()
@@ -184,7 +258,6 @@ def validate_one_epoch(model, loader, criterion, device, label_scaler=None, abla
         mae = np.mean(np.abs(all_preds - all_labels))
         std = np.std(np.abs(all_preds - all_labels))
     
-    # FIX 2: Add correlations to the dictionary
     metrics = {
         "val_loss": avg_loss,
         "val_mae": mae,
@@ -194,95 +267,14 @@ def validate_one_epoch(model, loader, criterion, device, label_scaler=None, abla
     return metrics
 
 
-def run_training(model, train_loader, val_loader, epochs=1000, lr=1e-3, 
-                 device="cpu", score_scaler=None, patience=50, min_delta=0.01, 
-                 required_train_mae=5.5, min_epochs_before_scheduling=100, verbose=True, ablation=None):
-    
-    model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
-    criterion = nn.MSELoss()
-    
-    # Scheduler: Reduces LR by half (factor=0.5) if val_loss doesn't improve for 20 epochs
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=50, min_lr=1e-5
-    )
-
-    best_val_mae = float('inf')
-    bm_train_mae = float('inf')
-    best_epoch = -1
-    epochs_no_improve = 0
-    history = []
-
-    print(f"Starting training on {device} (Max Epochs: {epochs}, Patience: {patience})")
-
-    if verbose:
-        print(f"{'Epoch':<5} | {'Train MAE':<10} | {'Val Loss':<10} | {'Val MAE':<10} | {'LR':<8}")
-        print("-" * 75)
-
-    for epoch in range(epochs):
-        # 1. Train
-        train_loss, train_mae, train_std = train_one_epoch(
-            model, train_loader, optimizer, criterion, device, score_scaler=score_scaler, ablation=ablation
-        )
-        
-        # 2. Validate
-        if epoch % 100 == 0:
-            d=1
-        metrics = validate_one_epoch(model, val_loader, criterion, device, label_scaler=score_scaler, ablation=ablation)
-        val_loss = metrics['val_loss']
-        val_mae = metrics['val_mae']
-        
-        # 3. Update Scheduler (Uses val_loss to decide when to drop LR)
-        if epoch >= min_epochs_before_scheduling:
-            scheduler.step(val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-        
-        # 4. Logging
-        if verbose:
-            if (epoch + 1) % 5 == 0 or epoch == 0: # Print every 5 epochs to keep it clean
-                print(f"{epoch+1:<5} | {train_mae:.3f}     | {val_loss:.4f}     | {val_mae:.4f}     | {current_lr:.1e}")
-        
-        history.append({
-            'epoch': epoch,
-            'train_loss': train_loss,
-            'train_mae': train_mae,
-            'lr': current_lr,
-            **metrics
-        })
-
-        # 5. Early Stopping Logic
-        if train_mae < required_train_mae and epoch >= min_epochs_before_scheduling:
-            if val_mae < (best_val_mae - min_delta):
-                best_val_mae = val_mae
-                bm_train_mae = train_mae
-                best_epoch = epoch
-                torch.save(model.state_dict(), "best_mil_model.pth")
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-        else:
-            epochs_no_improve = 0  # Reset if train MAE not yet good enough
-                
-            
-        if epochs_no_improve >= patience:
-            print(f"\n[Terminated] Early stopping at epoch {epoch+1}.Model saved at Epoch {best_epoch+1}. Best Val MAE: {best_val_mae:.4f} with train MAE: {bm_train_mae:.4f}")
-            break
-    
-    if epoch == epochs - 1:
-        print(f"\n[Completed] Reached max epochs ({epochs}). Best Val MAE: {best_val_mae:.4f} with train MAE: {bm_train_mae:.4f} at Epoch {best_epoch+1}")
-
-    # Load best weights
-    model.load_state_dict(torch.load("best_mil_model.pth", weights_only=True))
-    return model, history
-
-
 
 import copy
 from collections import deque
 
 def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3, 
                           device="cpu", score_scaler=None, patience=50, 
-                          verbose=True, ablation=None, use_weight_averaging=True, avg_window=20, train_mae_threshold=4.4):
+                          verbose=True, ablation=None, use_weight_averaging=True, 
+                          avg_window=20, train_mae_threshold=4.4):
     
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
@@ -309,7 +301,7 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
         # 1. Train
         if epoch % 100 == 0:
             d=1
-        train_loss, train_mae, train_std = train_one_epoch(
+        train_loss, train_mae, max_alpha_feature_dist, alpha_ratios_dist = train_one_epoch(
             model, train_loader, optimizer, criterion, device, score_scaler=score_scaler, ablation=ablation
         )
         
@@ -352,6 +344,10 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
         if epochs_no_improve >= patience:
             print(f"\n[Terminated] Training converged at epoch {epoch+1}.")
             break
+    
+    # DEBUG TO Remove later
+    print("max alpha feature windows\n", max_alpha_feature_dist)
+    print("alpha ratios distribution\n", alpha_ratios_dist)
         
 
     # 7. Apply Weight Averaging
@@ -365,7 +361,7 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
         model.load_state_dict(avg_state)
         
         # Final test pass with the averaged model
-        _, train_mae, _ = train_one_epoch(model, train_loader, optimizer, criterion, device, score_scaler=score_scaler, ablation=ablation)
+        _, train_mae, _, _ = train_one_epoch(model, train_loader, optimizer, criterion, device, score_scaler=score_scaler, ablation=ablation)
         final_metrics = validate_one_epoch(model, test_loader, criterion, device, label_scaler=score_scaler, ablation=ablation)
         final_test_mae = final_metrics['val_mae']
         final_train_mae = train_mae
@@ -520,3 +516,95 @@ def run_inner_cv_ensemble(model_class, full_train_dataset, test_loader, n_inner_
     
     # Calculate final MAE based on the averaged predictions
     # ... return final metrics ...
+
+
+
+
+
+
+
+
+
+
+# old 
+
+def run_training(model, train_loader, val_loader, epochs=1000, lr=1e-3, 
+                 device="cpu", score_scaler=None, patience=50, min_delta=0.01, 
+                 required_train_mae=5.5, min_epochs_before_scheduling=100, verbose=True, ablation=None):
+    
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
+    criterion = nn.MSELoss()
+    
+    # Scheduler: Reduces LR by half (factor=0.5) if val_loss doesn't improve for 20 epochs
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=50, min_lr=1e-5
+    )
+
+    best_val_mae = float('inf')
+    bm_train_mae = float('inf')
+    best_epoch = -1
+    epochs_no_improve = 0
+    history = []
+
+    print(f"Starting training on {device} (Max Epochs: {epochs}, Patience: {patience})")
+
+    if verbose:
+        print(f"{'Epoch':<5} | {'Train MAE':<10} | {'Val Loss':<10} | {'Val MAE':<10} | {'LR':<8}")
+        print("-" * 75)
+
+    for epoch in range(epochs):
+        # 1. Train
+        train_loss, train_mae, train_std = train_one_epoch(
+            model, train_loader, optimizer, criterion, device, score_scaler=score_scaler, ablation=ablation
+        )
+        
+        # 2. Validate
+        if epoch % 100 == 0:
+            d=1
+        metrics = validate_one_epoch(model, val_loader, criterion, device, label_scaler=score_scaler, ablation=ablation)
+        val_loss = metrics['val_loss']
+        val_mae = metrics['val_mae']
+        
+        # 3. Update Scheduler (Uses val_loss to decide when to drop LR)
+        if epoch >= min_epochs_before_scheduling:
+            scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        # 4. Logging
+        if verbose:
+            if (epoch + 1) % 5 == 0 or epoch == 0: # Print every 5 epochs to keep it clean
+                print(f"{epoch+1:<5} | {train_mae:.3f}     | {val_loss:.4f}     | {val_mae:.4f}     | {current_lr:.1e}")
+        
+        history.append({
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'train_mae': train_mae,
+            'lr': current_lr,
+            **metrics
+        })
+
+        # 5. Early Stopping Logic
+        if train_mae < required_train_mae and epoch >= min_epochs_before_scheduling:
+            if val_mae < (best_val_mae - min_delta):
+                best_val_mae = val_mae
+                bm_train_mae = train_mae
+                best_epoch = epoch
+                torch.save(model.state_dict(), "best_mil_model.pth")
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+        else:
+            epochs_no_improve = 0  # Reset if train MAE not yet good enough
+                
+            
+        if epochs_no_improve >= patience:
+            print(f"\n[Terminated] Early stopping at epoch {epoch+1}.Model saved at Epoch {best_epoch+1}. Best Val MAE: {best_val_mae:.4f} with train MAE: {bm_train_mae:.4f}")
+            break
+    
+    if epoch == epochs - 1:
+        print(f"\n[Completed] Reached max epochs ({epochs}). Best Val MAE: {best_val_mae:.4f} with train MAE: {bm_train_mae:.4f} at Epoch {best_epoch+1}")
+
+    # Load best weights
+    model.load_state_dict(torch.load("best_mil_model.pth", weights_only=True))
+    return model, history
