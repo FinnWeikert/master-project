@@ -25,19 +25,14 @@ def aggregate_window_features(df_windows, p=90, active_with_idle=True):
     else:
         df_active = df_windows.copy()
     
+    
     # Define aggregation strategies based on feature type
     # A. Magnitude Features (Where the 'Average' matters)
     #    Velocity, Spacing, Ang Velocity
     possible_feats = [
-        'vel_mean', 'vel_p90', 'spatial_spread', 
-        'ang_vel_mean', 'bimanual_dist_mean', 'bimanual_dist_std', 'bimanual_sync',
-        'jerk', 'curvature', 'path_ratio', 'num_reversals', 'palm_area_cv', 'bimanual_imbalance'
-    ]
-    
-    # B. Error Features (Where the 'Worst Case' matters)
-    #    Jerk, Reversals, Path Ratio, Curvature -> We want to catch the spikes
-    feats_error = [
-        'jerk', 'curvature', 'path_ratio', 'num_reversals', 'palm_area_cv', 'bimanual_imbalance'
+        'zvr', 'vel_p90', 'spatial_spread', 
+        'jerk', 'curvature', 'path_ratio', 
+        'sparc', 'palm_area_cv',
     ]
     
     # Filter lists to ensure columns actually exist
@@ -72,11 +67,22 @@ def aggregate_window_features(df_windows, p=90, active_with_idle=True):
 
     # --- 5. Merge ---
     df_final = df_economy.join(df_kinematics, how='left')
+
+    bimanual_feats = ['bimanual_dist_mean', 'bimanual_dist_std', 'bimanual_sync', 'bimanual_imbalance']
+
+    if all(f in df_windows.columns for f in bimanual_feats):
+        df_bimanual = df_windows[df_windows['bimanual_dist_mean'].notna() &
+                                 df_windows['bimanual_dist_std'].notna() & 
+                                 df_windows['bimanual_sync'].notna() & 
+                                 df_windows['bimanual_imbalance'].notna()][['video_id']+bimanual_feats]
+        
+        aggs = {}
     
-    # Handle Missing Data (Rare case: Surgeon was NEVER active)
-    # Filling with 0 is okay for 'jerk' (smooth), but bad for 'path_ratio' (efficiency).
-    # A safer bet is filling with the median of the entire dataset, 
-    # but for Ridge Regression, 0 (if standardized later) is acceptable.
-    df_final = df_final.fillna(0)
+        for f in bimanual_feats:
+            aggs[f] = ['median', 'std', p_high, p_low]
+
+        df_bimanual_agg = df_bimanual.groupby('video_id').agg(aggs)
+        df_bimanual_agg.columns = [f"{c[0]}_{c[1]}" for c in df_bimanual_agg.columns]
+        df_final = df_final.join(df_bimanual_agg, how='left')
     
     return df_final.reset_index()

@@ -132,13 +132,26 @@ class SurgicalFeatureExtractor:
         angle_change = np.mod(angle_change + np.pi, 2*np.pi) - np.pi # Wrap -pi to pi
         
         # Only count turns when movement is significant
-        move_mask = df["disp_filtered"].values[1:] > 3 #self.min_disp
+        move_mask = df["velocity"].values[1:] > self.vel_thresh
         # Align masks (diff reduces length by 1)
         valid_changes = angle_change[move_mask[:-1]]
         
         if len(valid_changes) > 0:
             mean_abs_angle = np.mean(np.abs(valid_changes)[~np.isnan(valid_changes)])
-            num_reversals = np.sum(np.diff(np.sign(valid_changes)) != 0)
+            #num_reversals = np.sum(np.diff(np.sign(valid_changes)) != 0)
+
+            signs = np.sign(angle_change)
+
+            valid = move_mask[:-1] & move_mask[1:]
+
+            filtered_signs = signs.copy()
+            filtered_signs[~valid] = 0  # or np.nan
+
+            # Now compute diff only where consecutive valid
+            reversal_mask = (filtered_signs[1:] != filtered_signs[:-1]) & valid[1:]
+
+            num_reversals = np.sum(reversal_mask)
+
         else:
             mean_abs_angle = 0
             num_reversals = 0
@@ -171,26 +184,6 @@ class SurgicalFeatureExtractor:
         frame_span = df["frame"].max() - df["frame"].min()
         frac_tracked = (len(df) / frame_span) if frame_span > 0 else 1.0
 
-
-        # --- NEW: Stationary Time % ---
-        # Time spent moving slower than 5px/sec (or low threshold)
-        # Using a small threshold (e.g., 5.0) distinct from the main threshold
-        stationary_mask = df["velocity"] < 30.0 
-        stationary_time = df.loc[stationary_mask, "dt"].sum()
-        stationary_ratio = stationary_time / duration if duration > 0 else 0
-        
-        # --- NEW: Workspace Area (Convex Hull) ---
-        # Measures how compact the surgeon's movements are
-        try:
-            points = df[["cx_smooth", "cy_smooth"]].dropna().values
-            if len(points) > 3:
-                hull = ConvexHull(points)
-                workspace_area = hull.volume # In 2D, volume is area
-            else:
-                workspace_area = 0.0
-        except QhullError:
-            workspace_area = np.nan
-
         return {
             f"total_path_{label}": total_path,
             f"total_duration_{label}": duration,
@@ -200,9 +193,7 @@ class SurgicalFeatureExtractor:
             f"nmu_peaks_{label}": nmu,
             f"efficiency_{label}": efficiency,
             f"mean_abs_angle_change_{label}": mean_abs_angle,
-            f"stationary_time_ratio_{label}": stationary_ratio, # New
-            f"workspace_area_{label}": workspace_area, # New
-            f"num_reversals_{label}": num_reversals,
+            f"angular_dir_switches_{label}": num_reversals,
             f"total_angular_path_{label}": total_angular_path,
             f"orientation_entropy_{label}": entropy,
             f"pose_variability_{label}": pose_var,
@@ -259,7 +250,7 @@ class SurgicalFeatureExtractor:
             "velocity_ratio": merged["velocity_L"].mean() / (merged["velocity_R"].mean() + 1e-6)
         }
     
-    def _count_reversals(self, df):
+    def _count_reversals_sofisticated(self, df):
         """
         Calculates directional reversals within segments to avoid artifacts 
         at video cuts.
@@ -302,43 +293,3 @@ class SurgicalFeatureExtractor:
             
         return total_reversals
     
-
-
-
-import os
-import numpy as np
-import pandas as pd
-from tqdm import tqdm
-
-"""
-# file paths
-processed_dir="data/processed/landmark_dataframes/"
-ratings_csv="data/scores/merged_scores.csv"
-
-# create scores dataframe
-df_ratings = pd.read_csv(ratings_csv)
-
-# create all metrics dataframe
-end = "_30fps_processed.pkl"
-processed_files = sorted([f for f in os.listdir(processed_dir) if f.endswith(end)])
-all_metrics = []
-
-for filename in tqdm(processed_files):
-    # Load raw tracking data
-    df_raw = pd.read_pickle(os.path.join(processed_dir, filename))
-    
-    # Initialize and compute in one step
-    extractor = SurgicalFeatureExtractor(df_raw, fps=30)
-    
-    # Get the 1-row dataframe of features
-    feats = extractor.features_df
-    feats["file"] = filename.replace('hand_tracking_', '').replace(end, '') # Add identifier
-    
-    all_metrics.append(feats)
-
-# Combine all videos
-df_all_metrics = pd.concat(all_metrics, ignore_index=True)
-
-# Merge with scores (as you did before)
-df_full = pd.merge(df_all_metrics, df_ratings, left_on="file", right_on="Vid_Name").drop(columns=["file"])
-"""

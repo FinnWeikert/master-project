@@ -840,7 +840,7 @@ class LandmarksProcessor:
         )
 
         df = self.swap_labels(df)
-        df = self.enforce_hand_label_consistency(df)
+        df = self.enforce_hand_label_consistency_conservative(df)
 
         left = df[df["hand_label"] == "Left"]
         right = df[df["hand_label"] == "Right"]

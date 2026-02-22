@@ -9,7 +9,7 @@ from sklearn.base import BaseEstimator, RegressorMixin
 class PyTorchMLPEnsemble(BaseEstimator, RegressorMixin):
     def __init__(self, input_dim, hidden_dim=16, n_hidden=1, dropout=0.1, lr=5e-4, 
                  max_epochs=1000, batch_size=10, weight_decay=1e-4, 
-                 n_models=4, patience=50, avg_window=50, device='cpu'):
+                 n_models=4, patience=50, avg_window=50, device='cpu', seed=42):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.n_hidden = n_hidden
@@ -23,7 +23,8 @@ class PyTorchMLPEnsemble(BaseEstimator, RegressorMixin):
         self.avg_window = avg_window    # Snapshots for Weight Averaging
         self.device = device
         self.models_ = []
-
+        self.seed = seed
+        
     def _build_single_model(self, seed):
         torch.manual_seed(seed) # Ensure different init for each ensemble member
         layers = [nn.Linear(self.input_dim, self.hidden_dim), nn.LeakyReLU(0.01), nn.Dropout(self.dropout)]
@@ -39,7 +40,7 @@ class PyTorchMLPEnsemble(BaseEstimator, RegressorMixin):
         
         for i in range(self.n_models):
             # 1. Initialize unique model for Bagging
-            model = self._build_single_model(seed=i*42)
+            model = self._build_single_model(seed=i*self.seed)
             optimizer = optim.Adam(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
             criterion = nn.MSELoss()
             

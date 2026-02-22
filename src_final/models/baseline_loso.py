@@ -314,12 +314,14 @@ def evaluate_loso_mlp_ensemble(
     overall_std = np.std(np.abs(np.array(all_true) - np.array(all_preds)))
     overall_corr, _ = spearmanr(all_true, all_preds)
     overall_r2 = r2_score(all_true, all_preds)
+    overall_adj_r2 = 1 - (1 - overall_r2) * (len(all_true) - 1) / (len(all_true) - X_train_final.shape[1] - 1)
 
     summary = {
         'Overall_MAE': overall_mae,
         'Overall_MAE_STD': overall_std,
         'Overall_Spearman_R': overall_corr,
-        'Overall_R2': overall_r2
+        'Overall_R2': overall_r2,
+        'Overall_Adjusted_R2': overall_adj_r2
     }
 
     fold_results_df = pd.DataFrame.from_dict(fold_metrics, orient='index')
@@ -327,7 +329,7 @@ def evaluate_loso_mlp_ensemble(
     if verbose:
         scaling_type = f"By Case" if scale_by_case else "Global"
         print(f"\n=== LOSOCV Ensemble MLP Results ({scaling_type} Scaling) ===")
-        print(f"Spearman R: {overall_corr:.4f} | MAE: {overall_mae:.4f} | MAE STD: {overall_std:.4f} | R2: {overall_r2:.4f}")
+        print(f"Spearman R: {overall_corr:.4f} | MAE: {overall_mae:.4f} | MAE STD: {overall_std:.4f} | R2: {overall_r2:.4f} | Adjusted R2: {overall_adj_r2:.4f}")
         print(f"\n--- Per-Fold Performance Summary ---")
     
     plot_loso_results(predictions_df, title=f"LOSOCV: MLP Ensemble (N={model_params.get('n_models', 5)})")
@@ -451,12 +453,176 @@ def run_nested_loso(
     # Calculate Stability Statistics for the Thesis Table
     all_selected = [item for sublist in stability_df['Selected'] for item in sublist]
     stability_stats = pd.Series(all_selected).value_counts() / len(unique_surgeons)
+    overall_r2 = r2_score(all_true, all_preds)
+    overall_adj_r2 = 1 - (1 - overall_r2) * (len(all_true) - 1) / (len(all_true) - X_train_final.shape[1] - 1)
     
     print(f"\n=== Nested LOSO Summary ({model_type}) ===")
     print(f"MAE: {mean_absolute_error(all_true, all_preds):.4f} +/- {np.std(np.abs(np.array(all_true) - np.array(all_preds))):.4f}")
     print(f"Train MAE: {mean_absolute_error(all_true_train, all_preds_train):.4f}")
     print(f"Spearman R: {spearmanr(all_true, all_preds)[0]:.4f}")
+    print(f"Overall R2: {overall_r2:.4f}")
+    print(f"Overall Adjusted R2: {overall_adj_r2:.4f}")
     print("\nFeature Selection Stability:")
     print(stability_stats)
     
     return results_df, stability_stats
+
+
+
+
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, r2_score
+from scipy.stats import spearmanr
+
+def run_automated_nested_loso(
+    df,
+    feature_pool,         # All possible features to consider
+    extra_features=None,  # Included without selection (e.g. Case IDs)
+    target_col='QRS_Overal',
+    surgeon_col='Participant Number',
+    case_col='Case_Number',
+    model_type='ridge',
+    model_params=None,
+    top_n=2,
+    global_corr_threshold=0.6, # Threshold for initial global feature filtering
+    global_redundancy_threshold=0.95, # Threshold to remove redundant global features
+    pr2_threshold=0.05,
+    corr_threshold=0.75, # Threshold used inside the Partial R2 selector
+    print_fold_metrics=True,
+    top_n_globals=5
+
+):
+    if extra_features is None: extra_features = []
+    if model_params is None: model_params = {}
+    
+    unique_surgeons = df[surgeon_col].unique()
+    # Assuming NestedFeatureSelector is defined elsewhere in your code
+    selector = NestedFeatureSelector(top_n=top_n, pr2_threshold=pr2_threshold, corr_threshold=corr_threshold)
+    
+    all_preds, all_true, all_surgeons = [], [], []
+    all_preds_train, all_true_train = [], []
+    selection_history = [] 
+
+    for surgeon_out in unique_surgeons:
+        # --- 1. Split ---
+        train_idx = df[df[surgeon_col] != surgeon_out].index
+        test_idx = df[df[surgeon_col] == surgeon_out].index
+        
+        df_train = df.loc[train_idx].copy()
+        df_test = df.loc[test_idx].copy()
+        
+        # --- 2. Scaling ---
+        # Scale all numeric features in the pool + non-categorical extras
+        scale_extras = [c for c in extra_features if df[c].nunique() > 2]
+        cols_to_scale = list(set(feature_pool + scale_extras))
+
+        scaler = StandardScaler()
+        df_train[cols_to_scale] = scaler.fit_transform(df_train[cols_to_scale])
+        df_test[cols_to_scale] = scaler.transform(df_test[cols_to_scale])
+
+        # --- 3. Automated "Global" Selection ---
+        # Calculate correlation with target for all features in the pool
+        correlations = df_train[feature_pool].corrwith(df_train[target_col]).abs()
+        if global_corr_threshold is not None:
+            # corr threshdold
+            high_corr_features = correlations[correlations > global_corr_threshold].sort_values(ascending=False).index.tolist()
+        else:
+            # top n
+            high_corr_features = correlations.sort_values(ascending=False).head(top_n_globals).index.tolist()
+
+        # Remove redundant features (inter-correlation > 0.95)
+        # Because they are sorted by target-corr, we keep the better predictor
+        final_globals = []
+        to_ignore = set()
+        for i, f1 in enumerate(high_corr_features):
+            if f1 in to_ignore: continue
+            final_globals.append(f1)
+            for f2 in high_corr_features[i+1:]:
+                if abs(df_train[f1].corr(df_train[f2])) > global_redundancy_threshold:
+                    to_ignore.add(f2)
+
+        # --- 4. PCA of Globals ---
+        if len(final_globals) > 0:
+            pca = PCA(n_components=1)
+            pc1_train = pca.fit_transform(df_train[final_globals])
+            pc1_test = pca.transform(df_test[final_globals])
+        else:
+            # Fallback if no feature hits the 0.6 threshold
+            pc1_train = np.zeros((len(df_train), 1))
+            pc1_test = np.zeros((len(df_test), 1))
+            print(f"Warning: No Global features found for Surgeon {surgeon_out}")
+
+        # Baseline: PC1 + Extras
+        X_tr_base = np.hstack([pc1_train, df_train[extra_features].values])
+        X_te_base = np.hstack([pc1_test, df_test[extra_features].values])
+
+        # --- 5. Candidate Feature Selection (Locals) ---
+        # Candidates are anything NOT used in the Global PCA
+        candidate_features = [f for f in feature_pool if f not in final_globals]
+        
+        selected_candidates, selected_pr2s = selector.select_features(
+            X_tr_base, df_train[target_col].values, df_train[candidate_features]
+        )
+        
+        selection_history.append({
+            'Surgeon_Out': surgeon_out, 
+            'Globals': final_globals, 
+            'Selected_Locals': selected_candidates
+        })
+
+        # --- 6. Final Matrix & Model ---
+        X_train_final = np.hstack([X_tr_base, df_train[selected_candidates].values])
+        X_test_final = np.hstack([X_te_base, df_test[selected_candidates].values])
+        
+        y_train = df_train[target_col].values
+        y_test = df_test[target_col].values
+
+        if model_type == 'ridge':
+            model = Ridge(alpha=model_params.get('alpha', 0.5))
+            model.fit(X_train_final, y_train)
+            preds = model.predict(X_test_final)
+            preds_train = model.predict(X_train_final)
+        
+        elif model_type == 'mlp':
+            y_scaler = StandardScaler()
+            y_tr_scaled = y_scaler.fit_transform(y_train.reshape(-1, 1))
+            model = PyTorchMLPEnsemble(input_dim=X_train_final.shape[1], **model_params)
+            model.fit(X_train_final, y_tr_scaled)
+            
+            preds_scaled = model.predict(X_test_final)
+            preds = y_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
+            preds_train_scaled = model.predict(X_train_final)
+            preds_train = y_scaler.inverse_transform(preds_train_scaled.reshape(-1, 1)).flatten()
+
+        # Statistics Gathering
+        all_preds.extend(preds)
+        all_true.extend(y_test)
+        all_preds_train.extend(preds_train)
+        all_true_train.extend(y_train)
+        all_surgeons.extend([surgeon_out] * len(y_test))
+
+        if print_fold_metrics:
+            print(f"Surgeon {surgeon_out} | Globals: {len(final_globals)},  PC1 Explained Var: {pca.explained_variance_ratio_[0]:.4f} | Locals: {selected_candidates} with PR2s {[round(pr2,4) for pr2 in selected_pr2s]}")
+
+    # --- 7. Aggregation ---
+    results_df = pd.DataFrame({'Surgeon_ID': all_surgeons, 'True': all_true, 'Pred': all_preds})
+    
+    # Calculate Global Stability
+    all_globals = [item for sublist in [d['Globals'] for d in selection_history] for item in sublist]
+    global_stability = pd.Series(all_globals).value_counts() / len(unique_surgeons)
+    
+    # Calculate Local Stability
+    all_locals = [item for sublist in [d['Selected_Locals'] for d in selection_history] for item in sublist]
+    local_stability = pd.Series(all_locals).value_counts() / len(unique_surgeons)
+
+    print(f"\n=== Fully Automated Nested LOSO Summary ({model_type}) ===")
+    print(f"MAE: {mean_absolute_error(all_true, all_preds):.4f}")
+    print(f"Error STD: {np.std(np.abs(np.array(all_true) - np.array(all_preds))):.4f}")
+    print(f"Spearman R: {spearmanr(all_true, all_preds)[0]:.4f}")
+    print(f"Overall R2: {r2_score(all_true, all_preds):.4f}")
+    
+    return results_df, global_stability, local_stability

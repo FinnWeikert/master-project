@@ -1,1 +1,0 @@
-# create sliding windows from trajectory

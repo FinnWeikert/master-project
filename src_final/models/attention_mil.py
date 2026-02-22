@@ -79,80 +79,6 @@ class HybridAttentionMIL(nn.Module):
         return score, alpha
     
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from collections import deque
-import numpy as np
-
-class HybridAttentionMIL_new(nn.Module):
-    def __init__(self, local_dim, global_dim, attention_hidden_dim=8, 
-                 mlp_hidden_dim=8, dropout=0.25, temperature=0.1):
-        super().__init__()
-        self.temperature = temperature
-        
-        # 1. Normalization layers to stabilize attention
-        self.local_norm = nn.LayerNorm(local_dim)
-        self.global_norm = nn.LayerNorm(global_dim)
-
-        # 2. Gated Attention Mechanism
-        self.attention_V = nn.Sequential(
-            nn.Linear(local_dim, attention_hidden_dim),
-            nn.Tanh()
-        )
-        self.attention_U = nn.Sequential(
-            nn.Linear(local_dim, attention_hidden_dim),
-            nn.Sigmoid()
-        )
-        self.attention_weights = nn.Linear(attention_hidden_dim, 1)
-
-        # 3. Final Regressor (Fusion)
-        fusion_dim = local_dim + global_dim
-        self.regressor = nn.Sequential(
-            nn.Linear(fusion_dim, mlp_hidden_dim),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(mlp_hidden_dim, 1)
-        )
-        
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-    
-    def forward(self, bag, global_feat, ablation=None):
-        # Normalize inputs to stabilize gradients
-        bag = self.local_norm(bag)
-        global_feat = self.global_norm(global_feat)
-
-        # Calculate Attention
-        V = self.attention_V(bag) 
-        U = self.attention_U(bag) 
-        G = V * U               
-        
-        A_raw = self.attention_weights(G) 
-        
-        # Softmax with temperature and a small epsilon for numerical stability
-        alpha = F.softmax(A_raw / self.temperature, dim=0) + 1e-10
-        alpha = alpha / alpha.sum() 
-        
-        # Aggregate Bag (Weighted Sum)
-        bag_embedding = torch.matmul(alpha.T, bag) # (1, local_dim)
-
-        if ablation == 'global_only':
-            bag_embedding = torch.zeros_like(bag_embedding)
-        elif ablation == 'mil_only':
-            global_feat = torch.zeros_like(global_feat)
-        
-        # Fusion & Prediction
-        fused = torch.cat([bag_embedding, global_feat.view(1, -1)], dim=1)
-        score = self.regressor(fused)
-        
-        return score, alpha
 
 
 ########### Training Functions ###########
@@ -284,6 +210,14 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
         optimizer, mode='min', factor=0.5, patience=40
     )
 
+    # alternative to try
+    """
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=patience,   
+        gamma=0.5      
+    )"""
+
     history = []
     best_train_mae = float('inf')
     bm_test_mae = float('inf')
@@ -312,6 +246,7 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
         
         # 3. Update Scheduler based on TRAIN loss
         scheduler.step(train_loss)
+        #scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         
         # 4. Collect state for averaging
@@ -330,16 +265,15 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
         })
 
         # 6. Convergence Check
-        if epoch >= 100:
-            if train_mae < best_train_mae - 0.001:
-                best_train_mae = train_mae
-                bm_test_mae = test_mae
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
+        if train_mae < best_train_mae - 0.001:
+            best_train_mae = train_mae
+            bm_test_mae = test_mae
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
-            if best_train_mae < train_mae_threshold:
-                break
+        if best_train_mae < train_mae_threshold:
+            break
             
         if epochs_no_improve >= patience:
             print(f"\n[Terminated] Training converged at epoch {epoch+1}.")
@@ -375,236 +309,258 @@ def run_training_unbiased(model, train_loader, test_loader, epochs=600, lr=1e-3,
 
 
 
+### NESTED training with inner validation set
+
+
 import torch
+import torch.nn as nn
 import numpy as np
-from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupKFold
+from copy import deepcopy
 
-def run_nested_training(
-    model, 
-    full_train_dataset,  # The N-1 surgeons
-    test_loader,         # The 1 held-out surgeon
-    val_size=0.2,        # Adjustable: % of training surgeons used for early stopping
-    batch_size=8,
-    epochs=1000,
-    lr=1e-3,
-    patience=50,
-    device="cpu",
-    score_scaler=None,
-):
-    """
-    Performs 'Honest' training by splitting the training pool into 
-    Internal Train and Internal Val.
-    """
-    
-    # 1. Internal Split (Avoiding Data Leakage)
-    # We split indices so we can use Subset
-    indices = np.arange(len(full_train_dataset))
-    train_idx, val_idx = train_test_split(indices, test_size=val_size, shuffle=True)
-    
-    inner_train_loader = DataLoader(Subset(full_train_dataset, train_idx), batch_size=batch_size, shuffle=True)
-    inner_val_loader = DataLoader(Subset(full_train_dataset, val_idx), batch_size=batch_size, shuffle=False)
-    
-    # 2. Setup
-    model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
-    criterion = torch.nn.MSELoss()
-    
-    # Scheduler monitors the INTERNAL validation loss
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=25
-    )
 
-    best_inner_val_mae = float('inf')
-    epochs_no_improve = 0
-    history = []
-
-    print(f"Inner Train size: {len(train_idx)} | Inner Val size: {len(val_idx)}")
-    
-    for epoch in range(epochs):
-        # --- TRAIN on Inner Train ---
-        train_loss, train_mae, _ = train_one_epoch(
-            model, inner_train_loader, optimizer, criterion, device, score_scaler=score_scaler
-        )
+class CrossValidatedTrainer:
+    def __init__(
+        self,
+        model_fn,                 # lambda: HybridAttentionMIL(...)
+        lr=2e-3,
+        weight_decay=1e-3,
+        epochs=600,
+        n_splits=4,
+        device="cpu",
+        ablation=None,
+        random_state=42,
+        patience=50,
+        plot_history=False
+    ):
+        self.model_fn = model_fn
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.epochs = epochs
+        self.n_splits = n_splits
+        self.device = device
+        self.ablation = ablation
+        self.random_state = random_state
+        self.patience = patience
         
-        # --- VALIDATE on Inner Val (Decides Early Stopping) ---
-        val_metrics = validate_one_epoch(
-            model, inner_val_loader, criterion, device, label_scaler=score_scaler
-        )
-        inner_val_mae = val_metrics['val_mae']
+        self.stopping_epoch_ = None
+        self.plot_history= plot_history
+        self.cv_history_ = []
+        self.history = []
         
-        # --- TEST on Held-out Surgeon (Purely for tracking, NOT for decisions) ---
-        test_metrics = validate_one_epoch(
-            model, test_loader, criterion, device, label_scaler=score_scaler
-        )
-        held_out_mae = test_metrics['val_mae']
 
-        scheduler.step(inner_val_mae)
-        
-        # --- Early Stopping Logic (Based ONLY on Inner Val) ---
-        if inner_val_mae < best_inner_val_mae:
-            best_inner_val_mae = inner_val_mae
-            # Save weights that worked best for the INTERNAL validation
-            torch.save(model.state_dict(), "inner_best_model.pth")
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
+    # ------------------------------------------------------------
+    # Full batch training for ONE model (used internally)
+    # ------------------------------------------------------------
+    def _train_full_batch(self, model, loader, optimizer, criterion, validation_loader=None, test_loader=None):
+        model.train()
+        total_loss = 0.0
+        total_mae = 0.0
+        n = 0
+
+        for bags, globs, labels, _ in loader:
+            optimizer.zero_grad()
             
-        if (epoch + 1) % 20 == 0:
-            print(f"Ep {epoch+1:03d} | InnerVal MAE: {inner_val_mae:.3f} | HeldOut MAE: {held_out_mae:.3f}")
+            labels = labels.to(self.device).view(-1, 1)  # Shape: [batch_size, 1]
+            batch_preds = []
 
-        if epochs_no_improve >= patience:
-            print(f"Early stopping triggered by Internal Validation at epoch {epoch+1}")
-            break
-
-    # 3. Final Evaluation
-    # Load the model that performed best on the Internal Val
-    model.load_state_dict(torch.load("inner_best_model.pth"))
-    
-    final_test_metrics = validate_one_epoch(
-        model, test_loader, criterion, device, label_scaler=score_scaler
-    )
-    
-    print(f"\n>> Final Performance on Held-Out Surgeon: {final_test_metrics['val_mae']:.4f}")
-    return model, final_test_metrics
-
-
-
-from sklearn.model_selection import KFold
-
-def run_inner_cv_ensemble(model_class, full_train_dataset, test_loader, n_inner_folds=5, **kwargs):
-    """
-    Trains 5 models on different internal splits. 
-    Tests the ENSEMBLE of these 5 models on the held-out surgeon.
-    """
-    indices = np.arange(len(full_train_dataset))
-    kf = KFold(n_splits=n_inner_folds, shuffle=True)
-    
-    ensemble_models = []
-    
-    for fold, (train_idx, val_idx) in enumerate(kf.split(indices)):
-        print(f"\n--- Starting Inner Fold {fold+1}/{n_inner_folds} ---")
-        
-        # Create a fresh instance of the model for this inner fold
-        model = model_class() 
-        
-        # Train this specific model using the internal val for early stopping
-        # (Using a version of run_training that saves to 'best_model_fold_X.pth')
-        trained_model, _ = run_nested_training(
-            model, 
-            Subset(full_train_dataset, train_idx), 
-            Subset(full_train_dataset, val_idx),
-            # ... other params ...
-        )
-        ensemble_models.append(trained_model)
-
-    # --- FINAL EVALUATION ON HELD-OUT SURGEON ---
-    all_ensemble_preds = []
-    
-    for test_bag, test_glob, test_label, _ in test_loader:
-        # Get predictions from ALL 5 models
-        batch_preds = []
-        for m in ensemble_models:
-            m.eval()
-            with torch.no_grad():
-                pred, _ = m(test_bag, test_glob)
-                batch_preds.append(pred)
-        
-        # Average the predictions (Ensemble)
-        avg_pred = torch.stack(batch_preds).mean(dim=0)
-        all_ensemble_preds.append(avg_pred)
-    
-    # Calculate final MAE based on the averaged predictions
-    # ... return final metrics ...
-
-
-
-
-
-
-
-
-
-
-# old 
-
-def run_training(model, train_loader, val_loader, epochs=1000, lr=1e-3, 
-                 device="cpu", score_scaler=None, patience=50, min_delta=0.01, 
-                 required_train_mae=5.5, min_epochs_before_scheduling=100, verbose=True, ablation=None):
-    
-    model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
-    criterion = nn.MSELoss()
-    
-    # Scheduler: Reduces LR by half (factor=0.5) if val_loss doesn't improve for 20 epochs
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=50, min_lr=1e-5
-    )
-
-    best_val_mae = float('inf')
-    bm_train_mae = float('inf')
-    best_epoch = -1
-    epochs_no_improve = 0
-    history = []
-
-    print(f"Starting training on {device} (Max Epochs: {epochs}, Patience: {patience})")
-
-    if verbose:
-        print(f"{'Epoch':<5} | {'Train MAE':<10} | {'Val Loss':<10} | {'Val MAE':<10} | {'LR':<8}")
-        print("-" * 75)
-
-    for epoch in range(epochs):
-        # 1. Train
-        train_loss, train_mae, train_std = train_one_epoch(
-            model, train_loader, optimizer, criterion, device, score_scaler=score_scaler, ablation=ablation
-        )
-        
-        # 2. Validate
-        if epoch % 100 == 0:
-            d=1
-        metrics = validate_one_epoch(model, val_loader, criterion, device, label_scaler=score_scaler, ablation=ablation)
-        val_loss = metrics['val_loss']
-        val_mae = metrics['val_mae']
-        
-        # 3. Update Scheduler (Uses val_loss to decide when to drop LR)
-        if epoch >= min_epochs_before_scheduling:
-            scheduler.step(val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-        
-        # 4. Logging
-        if verbose:
-            if (epoch + 1) % 5 == 0 or epoch == 0: # Print every 5 epochs to keep it clean
-                print(f"{epoch+1:<5} | {train_mae:.3f}     | {val_loss:.4f}     | {val_mae:.4f}     | {current_lr:.1e}")
-        
-        history.append({
-            'epoch': epoch,
-            'train_loss': train_loss,
-            'train_mae': train_mae,
-            'lr': current_lr,
-            **metrics
-        })
-
-        # 5. Early Stopping Logic
-        if train_mae < required_train_mae and epoch >= min_epochs_before_scheduling:
-            if val_mae < (best_val_mae - min_delta):
-                best_val_mae = val_mae
-                bm_train_mae = train_mae
-                best_epoch = epoch
-                torch.save(model.state_dict(), "best_mil_model.pth")
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-        else:
-            epochs_no_improve = 0  # Reset if train MAE not yet good enough
+            for i in range(len(bags)):
+                bag = [b.to(self.device) for b in bags[i]] if isinstance(bags[i], list) else bags[i].to(self.device)
+                glob = globs[i].unsqueeze(0).to(self.device)
                 
-            
-        if epochs_no_improve >= patience:
-            print(f"\n[Terminated] Early stopping at epoch {epoch+1}.Model saved at Epoch {best_epoch+1}. Best Val MAE: {best_val_mae:.4f} with train MAE: {bm_train_mae:.4f}")
-            break
-    
-    if epoch == epochs - 1:
-        print(f"\n[Completed] Reached max epochs ({epochs}). Best Val MAE: {best_val_mae:.4f} with train MAE: {bm_train_mae:.4f} at Epoch {best_epoch+1}")
+                pred, _ = model(bag, glob, ablation=self.ablation)
+                batch_preds.append(pred)
 
-    # Load best weights
-    model.load_state_dict(torch.load("best_mil_model.pth", weights_only=True))
-    return model, history
+            # Stack all bag predictions into a tensor [batch_size, 1]
+            batch_preds_tensor = torch.cat(batch_preds, dim=0)
+            
+            # Compute loss over entire batch
+            loss = criterion(batch_preds_tensor, labels)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item() * len(labels)
+            total_mae += torch.abs(batch_preds_tensor - labels).sum().item()
+            n += len(labels)
+
+        # Optionally compute metrics on validation/test set
+        if validation_loader is not None:
+            val_loss, val_mae = self._evaluate(model, validation_loader, criterion)
+            self.cv_history_[-1].append({
+                'train_loss': total_loss / n,
+                'train_mae': total_mae / n,
+                'val_loss': val_loss,
+                'val_mae': val_mae
+            })
+        elif test_loader is not None:
+            test_loss, test_mae = self._evaluate(model, test_loader, criterion)
+            self.history.append({
+                'train_loss': total_loss / n,
+                'train_mae': total_mae / n,
+                'test_loss': test_loss,
+                'test_mae': test_mae
+            })
+
+        return total_loss / n, total_mae / n
+
+
+    # ------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------
+    def _evaluate(self, model, loader, criterion):
+        model.eval()
+        total_loss = 0.0
+        total_mae = 0.0
+        n = 0
+
+        with torch.no_grad():
+            for bags, globs, labels, _ in loader:
+                labels = labels.to(self.device).view(-1, 1)
+                batch_preds = []
+
+                for i in range(len(bags)):
+                    bag = [b.to(self.device) for b in bags[i]] if isinstance(bags[i], list) else bags[i].to(self.device)
+                    glob = globs[i].unsqueeze(0).to(self.device)
+                    
+                    pred, _ = model(bag, glob, ablation=self.ablation)
+                    batch_preds.append(pred)
+
+                batch_preds_tensor = torch.cat(batch_preds, dim=0)
+                loss = criterion(batch_preds_tensor, labels)
+
+                total_loss += loss.item() * len(labels)
+                total_mae += torch.abs(batch_preds_tensor - labels).sum().item()
+                n += len(labels)
+
+        return total_loss / n, total_mae / n
+
+
+
+    # ------------------------------------------------------------
+    # Estimate stopping epoch via grouped CV
+    # ------------------------------------------------------------
+    def _estimate_stopping_epoch(self, dataset, groups):
+        """
+        Estimate stopping epoch via internal grouped CV, with early stopping based on validation MAE.
+        """
+        gkf = GroupKFold(n_splits=self.n_splits)
+        fold_best_epochs = []
+
+        for fold, (train_idx, val_idx) in enumerate(gkf.split(np.arange(len(dataset)), groups=groups)):
+
+            self.cv_history_.append([])  # For plotting CV history later
+
+            train_subset = torch.utils.data.Subset(dataset, train_idx)
+            val_subset = torch.utils.data.Subset(dataset, val_idx)
+
+            train_loader = torch.utils.data.DataLoader(
+                train_subset, batch_size=len(train_subset), shuffle=False, collate_fn=dataset.mil_collate_fn
+            )
+            val_loader = torch.utils.data.DataLoader(
+                val_subset, batch_size=len(val_subset), shuffle=False, collate_fn=dataset.mil_collate_fn
+            )
+
+            model = self.model_fn().to(self.device)
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+            criterion = nn.MSELoss()
+
+            best_val_mae = np.inf
+            best_epoch = 0
+            epochs_no_improve = 0
+
+            for epoch in range(self.epochs):
+                self._train_full_batch(model, train_loader, optimizer, criterion, validation_loader=val_loader)
+                _, val_mae = self._evaluate(model, val_loader, criterion)
+
+                if epoch > self.patience:
+                    if val_mae < best_val_mae - 1e-6:  # small epsilon to avoid float issues
+                        best_val_mae = val_mae
+                        best_epoch = epoch
+                        epochs_no_improve = 0
+                    else:
+                        epochs_no_improve += 1
+
+                    # Early stopping if no improvement for `patience` epochs
+                    if epochs_no_improve >= self.patience:
+                        print(f"[Fold {fold}] Early stopping at epoch {epoch+1} (best val MAE: {best_val_mae:.4f})")
+                        break
+            
+            if self.plot_history:
+                self._plot_cv_history(fold)
+
+            fold_best_epochs.append(best_epoch)
+
+        # Use median for robustness
+        stopping_epoch = int(np.median(fold_best_epochs))
+        self.stopping_epoch_ = stopping_epoch
+        
+        return stopping_epoch
+
+    # ------------------------------------------------------------
+    # Public Fit
+    # ------------------------------------------------------------
+    def fit(self, train_dataset, groups, test_dataset=None):
+        torch.manual_seed(self.random_state)
+
+        print("Estimating stopping epoch via internal grouped CV...")
+        stopping_epoch = self._estimate_stopping_epoch(train_dataset, groups)
+        print(f"Selected stopping epoch (median across folds): {stopping_epoch}")
+
+        # Retrain on FULL training set
+        loader = torch.utils.data.DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False, collate_fn=train_dataset.mil_collate_fn)
+        model = self.model_fn().to(self.device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        criterion = nn.MSELoss()
+
+        if test_dataset is not None:
+            test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=test_dataset.mil_collate_fn)
+
+        for epoch in range(stopping_epoch):
+            self._train_full_batch(model, loader, optimizer, criterion, test_loader=test_loader)
+
+        self.model_ = model
+        return model
+
+    # ------------------------------------------------------------
+    # Predict
+    # ------------------------------------------------------------
+    def predict(self, loader):
+        self.model_.eval()
+        preds = []
+
+        with torch.no_grad():
+            for bags, globs, _, _ in loader:
+                batch_preds = []
+
+                for i in range(len(bags)):
+                    bag = [b.to(self.device) for b in bags[i]] if isinstance(bags[i], list) else bags[i].to(self.device)
+                    glob = globs[i].unsqueeze(0).to(self.device)
+
+                    p, _ = self.model_(bag, glob, ablation=self.ablation)
+                    # Ensure p is at least 1D
+                    batch_preds.append(p.view(-1))
+
+                # Concatenate predictions safely
+                batch_preds_tensor = torch.cat(batch_preds, dim=0)
+                preds.extend(batch_preds_tensor.cpu().numpy())
+
+        return np.array(preds)
+
+    
+    def _plot_cv_history(self, fold):
+        import matplotlib.pyplot as plt
+        
+        epochs = range(1, len(self.cv_history_[fold]) + 1)
+        train_mae = [h['train_mae'] for h in self.cv_history_[fold]]
+        test_mae = [h['val_mae'] for h in self.cv_history_[fold]]
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(epochs, train_mae, label='Train MAE')
+        plt.plot(epochs, test_mae, label='Test MAE')
+        #plt.axvline(self.stopping_epoch_, color='red', linestyle='--', label='Selected Stopping Epoch')
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.title(f'Cross-Validation MAE Across Epochs (Fold {fold})')
+        plt.legend()
+        plt.grid()
+        plt.show()

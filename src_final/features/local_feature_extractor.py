@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from scipy.signal import periodogram
 
 class WindowFeatureExtractor:
     def __init__(
@@ -57,8 +58,8 @@ class WindowFeatureExtractor:
                     common_frames = df_seg['frame'].values
                     df_seg_other = df_other[df_other['frame'].isin(common_frames)]
                     
-                    # Only calculate if we have reasonably overlapping data
-                    if len(df_seg_other) > (len(df_seg) * 0.8): 
+                    # Only calculate if we have some overlapping data
+                    if len(df_seg_other) > (len(df_seg) * 0.1): 
                         # Note: We need to reindex to match Primary's exact length/order for vector math
                         df_seg_other = df_seg_other.set_index('frame').reindex(common_frames).reset_index()
                         signals_o = self._compute_signals(df_seg_other)
@@ -74,9 +75,13 @@ class WindowFeatureExtractor:
                     # Slice Secondary (if available)
                     win_o = None
                     if signals_o is not None:
-                        # Check if secondary data is valid (not NaN from reindex)
-                        # We just check a key array like 'vx'
-                        if not np.isnan(signals_o['vx'][start:end]).any():
+                        seg_ids_window = signals_o['segment_id'][start:end]
+                        # Check:
+                        # 1) No NaNs
+                        # 2) All same segment_id
+                        if (not np.isnan(signals_o['vx'][start:end]).any()
+                            and len(np.unique(seg_ids_window)) == 1
+                        ):
                             win_o = {k: v[start:end] for k, v in signals_o.items()}
 
                     # 6. Compute Features
@@ -124,101 +129,86 @@ class WindowFeatureExtractor:
             'pts0': pts0, 'd': d, 
             'vx': v_vec[:,0], 'vy': v_vec[:,1], 
             'ax': a_vec[:,0], 'ay': a_vec[:,1],
-            'ang_vel': ang_vel, 'palm_area': palm_area
+            'ang_vel': ang_vel, 'palm_area': palm_area,
+            'segment_id': df_seg['segment_id'].values
         }
 
     def _compute_all_metrics(self, win, win_other=None):
-        """ Master feature computer that delegates to sub-methods. """
         feats = {}
-        
-        # Basic Metadata
         feats['total_path'] = np.sum(win['d'])
-        
-        # idle defined as less the 0.33 movement change per frame => total_path / num_frames (window_size) < 1/3
         feats['is_idle'] = 1.0 if (feats['total_path']/self.window_size) < (1 / 3) else 0.0
 
-        # Feature Groups
+        # Feature Group 1: Translation & Workspace (Redundancy Reduced)
         feats.update(self._feat_translation(win))
-        feats.update(self._feat_smoothness(win, feats['total_path']))
-        feats.update(self._feat_rotation(win))
+        
+        # Feature Group 2: Robust Smoothness (SPARC)
+        feats.update(self._feat_fluidity(win))
+        
+        # Feature Group 3: Pose Stability
         feats.update(self._feat_pose(win))
         
-        # Bimanual (if enabled and data exists)
         if win_other is not None:
             feats.update(self._feat_bimanual(win, win_other))
         
         return feats
 
     # --- Feature Modules ---
-
     def _feat_translation(self, win):
+        """Focuses on Efficiency and Spatial Economy."""
         f = {}
-        # Path Ratio
+        # Path Ratio (Efficiency)
         start_pt, end_pt = win['pts0'][0], win['pts0'][-1]
         euclidean = np.sqrt(np.sum((end_pt - start_pt)**2))
-        path_ratio = np.sum(win['d']) / (euclidean + 1)#1e-6
+        path_ratio = np.sum(win['d']) / (euclidean + 1.0)
         f['path_ratio'] = np.log1p(path_ratio) if self.log_transform else path_ratio
-        if path_ratio > 200:
-            d=1
 
-        # Curvature
-        v_mag_sq = win['vx']**2 + win['vy']**2
-        cross = np.abs(win['vx'] * win['ay'] - win['vy'] * win['ax'])
-        # Only calculate curvature where velocity is sufficient (> 10 px/sec)
-        valid_mask = v_mag_sq > 20.0 
-        if np.sum(valid_mask) > 5:
-            k = cross[valid_mask] / (v_mag_sq[valid_mask]**1.5)
-            f['curvature'] = np.log1p(np.mean(k)) if self.log_transform else np.mean(k)
-        else:
-            f['curvature'] = 0.0 # Straight line assumption if stationary
-
-        # Reversals
-        #f['num_reversals'] = self._count_reversals(win['vx'], win['vy'])
-        
-        # Velocity Stats
-        v_mag = np.sqrt(v_mag_sq)
-        f['vel_mean'] = np.mean(v_mag)
-        f['vel_p90'] = np.percentile(v_mag, 90)
-
-        # Calculate the spatial dispersion (Work Envelope)
-        # High value = Wandering/Drifting; Low value = Focused/Steady
-        pts = win['pts0'] # (N, 2) array of wrist coordinates
+        # Spatial Spread (Economy) - Kept over vel_mean due to lower redundancy
+        pts = win['pts0']
         spatial_std = np.sqrt(np.std(pts[:, 0])**2 + np.std(pts[:, 1])**2)
         f['spatial_spread'] = np.log1p(spatial_std) if self.log_transform else spatial_std
+
+        # Zero Velocity Ratio (Micro-hesitations)
+        v_mag = np.sqrt(win['vx']**2 + win['vy']**2)
+        # Threshold: 5% of a typical 'moving' speed
+        f['zvr'] = np.mean(v_mag < 15) 
         
         return f
 
-    def _feat_smoothness(self, win, total_path):
-        # Calculate Square Jerk
-        jerk_x = np.diff(win['ax'], prepend=win['ax'][0]) / self.dt
-        jerk_y = np.diff(win['ay'], prepend=win['ay'][0]) / self.dt
-        int_sq_jerk = np.sum(jerk_x**2 + jerk_y**2) * self.dt
-        
-        # Duration of movement
-        duration = len(win['d']) * self.dt
-        
-        # Peak Velocity (Robust normalization)
+    def _feat_fluidity(self, win):
+        """Replaces Jerk with Spectral Arc Length (SPARC). frequency domain smoothnes, works well even after processing smoothing"""
         v_mag = np.sqrt(win['vx']**2 + win['vy']**2)
-        v_peak = np.max(v_mag)
-
-        # Prevent divide by zero if hand is stationary
-        if v_peak < 1e-6 or duration < 1e-6:
-            return {'log_dim_jerk': -10.0} # Log of a small number
-
-        # Standard Formula: (Integrated Jerk * Duration^3) / (PeakVel^2)
-        # Note: Powers vary by paper, but this is a common unitless form
-        dim_jerk = (int_sq_jerk * (duration**3)) / (v_peak**2)
-        dim_jerk = -np.log1p(dim_jerk) if self.log_transform else dim_jerk
-
-        return {'dim_jerk': dim_jerk} # Negative log often used so Higher = Smoother
-
-    def _feat_rotation(self, win):
-        return {
-            'ang_vel_mean': np.mean(np.abs(win['ang_vel'])),
-            'ang_vel_std': np.std(win['ang_vel'])
-        }
+        
+        # 1. SPARC Calculation
+        # Pad to next power of 2 for cleaner FFT
+        n_fft = max(1024, len(v_mag))
+        freqs, psd = periodogram(v_mag, fs=self.orig_fps, nfft=n_fft)
+        
+        # Normalize amplitude spectrum
+        amp = np.sqrt(psd)
+        amp /= np.max(amp + 1e-9)
+        
+        # Cutoff frequency (Surgical motion rarely exceeds 5Hz-10Hz)
+        fc = 10.0
+        mask = freqs <= fc
+        freqs_c = freqs[mask]
+        amp_c = amp[mask]
+        
+        # Calculate Arc Length of the spectrum
+        # It's the length of the curve of the normalized amplitude spectrum
+        d_freq = freqs_c[1] - freqs_c[0]
+        d_amp = np.diff(amp_c)
+        arc_length = np.sum(np.sqrt(d_freq**2 + d_amp**2))
+        
+        # SPARC is the negative arc length (Higher/Less Negative = Smoother)
+        f = {'sparc': -arc_length}
+        
+        # 2. Add Velocity P90 as a measure of peak intensity
+        f['vel_p90'] = np.percentile(v_mag, 90)
+        
+        return f
 
     def _feat_pose(self, win):
+        """Palm Area CV - robust 0th order feature."""
         area_mean = np.mean(win['palm_area'])
         cv = (np.std(win['palm_area']) / area_mean) if area_mean > 1e-6 else 0.0
         return {'palm_area_cv': cv}
@@ -248,11 +238,9 @@ class WindowFeatureExtractor:
             f['bimanual_sync'] = 0.0
 
         # 3. Dominance Ratio (Activity Balance)
-        # 0.5 = Equal usage, 1.0 = Primary only, 0.0 = Other only
         sum_vp = np.sum(vp_mag)
         sum_vo = np.sum(vo_mag)
         f['bimanual_ratio'] = sum_vp / (sum_vp + sum_vo + 1e-6)
-        f['bimanual_imbalance'] = np.abs(0.5 - f['bimanual_ratio']) 
 
         return f
 

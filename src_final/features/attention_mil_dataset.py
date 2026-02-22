@@ -46,15 +46,14 @@ class AttentionMILDataset(Dataset):
 
         return torch.from_numpy(bag), torch.from_numpy(global_feat), torch.tensor(label), vid_id
     
-
-def mil_collate_fn(batch):
-    """
-    Custom collate function to handle variable-sized bags.
-    Batch is a list of tuples: [(bag, global_feat, label, vid_id), ...]
-    """
-    bags = [item[0] for item in batch]        # List of Tensors (variable size)
-    global_feats = torch.stack([item[1] for item in batch]) # Stacked Tensor (Batch, D_global)
-    labels = torch.stack([item[2] for item in batch])  # Stacked Tensor (Batch, )
-    vid_ids = [item[3] for item in batch]     # List of IDs
-    
-    return bags, global_feats, labels, vid_ids
+    def mil_collate_fn(self,batch):
+        """
+        Custom collate function to handle variable-sized bags.
+        Batch is a list of tuples: [(bag, global_feat, label, vid_id), ...]
+        """
+        bags = [item[0] for item in batch]        # List of Tensors (variable size)
+        global_feats = torch.stack([item[1] for item in batch]) # Stacked Tensor (Batch, D_global)
+        labels = torch.stack([item[2] for item in batch])  # Stacked Tensor (Batch, )
+        vid_ids = [item[3] for item in batch]     # List of IDs
+        
+        return bags, global_feats, labels, vid_ids
