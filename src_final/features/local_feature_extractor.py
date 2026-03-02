@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from scipy.signal import periodogram
+from scipy.signal import find_peaks
+from scipy.signal.windows import tukey
 
 class WindowFeatureExtractor:
     def __init__(
@@ -170,11 +172,12 @@ class WindowFeatureExtractor:
         # Zero Velocity Ratio (Micro-hesitations)
         v_mag = np.sqrt(win['vx']**2 + win['vy']**2)
         # Threshold: 5% of a typical 'moving' speed
-        f['zvr'] = np.mean(v_mag < 15) 
+        f['zvr'] = np.mean(v_mag < 30) 
         
         return f
 
-    def _feat_fluidity(self, win):
+
+    def _feat_fluidity(self, win):        
         """Replaces Jerk with Spectral Arc Length (SPARC). frequency domain smoothnes, works well even after processing smoothing"""
         v_mag = np.sqrt(win['vx']**2 + win['vy']**2)
         
@@ -201,10 +204,37 @@ class WindowFeatureExtractor:
         
         # SPARC is the negative arc length (Higher/Less Negative = Smoother)
         f = {'sparc': -arc_length}
+
+        # 2. HF_Ratio (Use Tukey for Spectral Ratio)
+        # Taper edges to prevent spectral leakage
+        v_tapered = v_mag * tukey(len(v_mag), alpha=0.15)
+        freqs, psd = periodogram(v_tapered, fs=self.orig_fps, nfft=1024)
         
-        # 2. Add Velocity P90 as a measure of peak intensity
-        f['vel_p90'] = np.percentile(v_mag, 90)
+        low_band = np.sum(psd[(freqs >= 0.5) & (freqs <= 3.0)]) # 0.5Hz to ignore DC/Offset
+        high_band = np.sum(psd[(freqs > 3.0) & (freqs <= 10.0)])
+        f['hf_ratio'] = high_band / (low_band + high_band + 1e-9)
+
+        # 3. Speed Peaks (The "Sub-movement" count)
+        # Prominence ensures we don't count tiny sensor noise as 'peaks'
+        # For surgeons, a 'real' sub-movement usually has some significant amplitude
+        peaks, _ = find_peaks(v_mag, prominence=np.std(v_mag) * 0.3)
+        f['speed_peaks'] = float(len(peaks))
+
+        # 1. Compute acceleration magnitude at each frame
+        # win['ax'] and win['ay'] are already pre-computed in _compute_signals
+        a_mag = np.sqrt(win['ax']**2 + win['ay']**2)
         
+        # 2. Compute Root Mean Square (RMS)
+        # This captures the 'energy' of the acceleration signal
+        acc_rms = np.sqrt(np.mean(a_mag**2))
+        
+        # 3. Optional: Log-transform because acceleration energy 
+        # often follows a long-tailed distribution
+        if self.log_transform:
+            f['acc_rms'] = np.log1p(acc_rms)
+        else:
+            f['acc_rms'] = acc_rms
+
         return f
 
     def _feat_pose(self, win):
@@ -212,6 +242,27 @@ class WindowFeatureExtractor:
         area_mean = np.mean(win['palm_area'])
         cv = (np.std(win['palm_area']) / area_mean) if area_mean > 1e-6 else 0.0
         return {'palm_area_cv': cv}
+
+    def _feat_acceleration_energy(self, win):
+        """
+        Computes the RMS of acceleration magnitude.
+        Higher values indicate 'shaky' or 'staccato' motion (Novice).
+        Lower values indicate smooth, constant-velocity motion (Expert).
+        """
+        # 1. Compute acceleration magnitude at each frame
+        # win['ax'] and win['ay'] are already pre-computed in _compute_signals
+        a_mag = np.sqrt(win['ax']**2 + win['ay']**2)
+        
+        # 2. Compute Root Mean Square (RMS)
+        # This captures the 'energy' of the acceleration signal
+        acc_rms = np.sqrt(np.mean(a_mag**2))
+        
+        # 3. Optional: Log-transform because acceleration energy 
+        # often follows a long-tailed distribution
+        if self.log_transform:
+            return {'acc_rms': np.log1p(acc_rms)}
+        
+        return {'acc_rms': acc_rms}
 
     def _feat_bimanual(self, win_p, win_o):
         """ 

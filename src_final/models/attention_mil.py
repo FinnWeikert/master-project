@@ -5,18 +5,20 @@ import pandas as pd
 
 
 class HybridAttentionMIL(nn.Module):
-    def __init__(self, local_dim=1, global_dim=2, attention_hidden_dim=4, 
-                 mlp_hidden_dim=4, dropout=0.25, use_feature_extractor=False,
-                 temperature=0.1): # <--- Added temperature
+    def __init__(self, local_dim=1, global_dim=2, attention_hidden_dim=8, 
+                 mlp_hidden_dim=8, n_hidden=1, dropout=0.25, 
+                 use_feature_extractor=False, temperature=1,
+                 feature_extractor_dim=8): # <--- Added temperature
         super().__init__()
         self.temperature = temperature
         
         if use_feature_extractor:
             self.feature_extractor = nn.Sequential(
-                nn.Linear(local_dim, local_dim),
+                nn.Linear(local_dim, feature_extractor_dim),
                 nn.LeakyReLU(),
                 nn.Dropout(dropout)
             )
+            local_dim = feature_extractor_dim  
         else:
             self.feature_extractor = nn.Identity()
 
@@ -31,12 +33,26 @@ class HybridAttentionMIL(nn.Module):
         self.attention_weights = nn.Linear(attention_hidden_dim, 1)
 
         fusion_dim = local_dim + global_dim
-        self.regressor = nn.Sequential(
-            nn.Linear(fusion_dim, mlp_hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(mlp_hidden_dim, 1)
-        )
+        if n_hidden == 1:
+            self.regressor = nn.Sequential(
+                nn.Linear(fusion_dim, mlp_hidden_dim),
+                nn.LeakyReLU(0.01),
+                nn.Dropout(dropout),
+                nn.Linear(mlp_hidden_dim, 1)
+            )
+        else:
+            # Keeps width consistent to preserve feature interactions
+            layers = []
+            curr_dim = fusion_dim
+            for _ in range(n_hidden):
+                layers.extend([
+                    nn.Linear(curr_dim, mlp_hidden_dim),
+                    nn.LeakyReLU(0.01),
+                    nn.Dropout(dropout)
+                ])
+                curr_dim = mlp_hidden_dim
+            layers.append(nn.Linear(mlp_hidden_dim, 1))
+            self.regressor = nn.Sequential(*layers)
         
         self._init_weights()
 
