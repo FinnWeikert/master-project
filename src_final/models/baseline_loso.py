@@ -23,7 +23,8 @@ def evaluate_loso_model(
     scale_by_case=False,    # NEW: Toggle for case-wise standardization
     scale_features=True,    # Global scaling (if scale_by_case is False)
     verbose=True,
-    print_fold_metrics=False
+    print_fold_metrics=False,
+    plot=True
 ):
     if extra_features is None:
         extra_features = []
@@ -90,6 +91,12 @@ def evaluate_loso_model(
             X_test_pca = pca.transform(X_test_prim)
             X_train_final = X_train_pca[:, pca_components]
             X_test_final = X_test_pca[:, pca_components]
+
+            # standardize PCA components if not already scaled (they should be, but just in case)
+            if scale_features:
+                pca_scaler = StandardScaler()
+                X_train_final = pca_scaler.fit_transform(X_train_final)
+                X_test_final = pca_scaler.transform(X_test_final)
         else:
             X_train_final = X_train_prim
             X_test_final = X_test_prim
@@ -160,7 +167,8 @@ def evaluate_loso_model(
         if print_fold_metrics:
             print(fold_results_df)
     
-    plot_loso_results(predictions_df, title=f"LOSOCV: {model_class.__name__} | Scaling: {scaling_type}")
+    if plot:
+        plot_loso_results(predictions_df, title=f"LOSOCV: {model_class.__name__} | Scaling: {scaling_type}")
     
     return summary, fold_results_df, predictions_df
 
@@ -395,7 +403,11 @@ def run_nested_loso(
         pca = PCA(n_components=1)
         pc1_train = pca.fit_transform(df_train[primary_features])
         pc1_test = pca.transform(df_test[primary_features])
-        
+        # scale pc1
+        pc1_scaler = StandardScaler()
+        pc1_train = pc1_scaler.fit_transform(pc1_train)
+        pc1_test = pc1_scaler.transform(pc1_test)
+
         X_tr_base = np.hstack([pc1_train, df_train[extra_features].values])
         X_te_base = np.hstack([pc1_test, df_test[extra_features].values])
 

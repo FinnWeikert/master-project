@@ -168,11 +168,6 @@ class WindowFeatureExtractor:
         pts = win['pts0']
         spatial_std = np.sqrt(np.std(pts[:, 0])**2 + np.std(pts[:, 1])**2)
         f['spatial_spread'] = np.log1p(spatial_std) if self.log_transform else spatial_std
-
-        # Zero Velocity Ratio (Micro-hesitations)
-        v_mag = np.sqrt(win['vx']**2 + win['vy']**2)
-        # Threshold: 5% of a typical 'moving' speed
-        f['zvr'] = np.mean(v_mag < 30) 
         
         return f
 

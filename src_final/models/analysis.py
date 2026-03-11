@@ -112,7 +112,7 @@ def leakage_free_residual_analysis(
     
     fold_results = []
     
-    for surgeon_out in tqdm(unique_surgeons, desc="Analyzing Folds"):
+    for surgeon_out in unique_surgeons:
         # --- A. Define Split ---
         # We use boolean indexing for logic, but need integer indices for the shuffle mapping
         train_mask = df_clean[surgeon_col] != surgeon_out
@@ -144,12 +144,16 @@ def leakage_free_residual_analysis(
         pca = PCA(n_components=n_components)
         
         # Fit on Train
-        pca.fit(X_train_pca_raw)
+        train_pcs = pca.fit_transform(X_train_pca_raw)
         
         # Transform All (Generate PCs for the whole dataset based on Train projection)
         all_pcs = pca.transform(X_all_pca_raw)
         pc_col_names = [f'PCA_Comp_{i+1}' for i in range(n_components)]
-        df_fold[pc_col_names] = all_pcs
+
+        pca_scaler = StandardScaler()
+        all_pcs_scaled = pca_scaler.fit(train_pcs).transform(all_pcs)
+
+        df_fold[pc_col_names] = all_pcs_scaled  
 
         # --- D. Define Baseline & Candidates ---
         baseline_cols = ['PCA_Comp_1'] + base_features
@@ -246,7 +250,8 @@ def leakage_free_residual_analysis(
     summary.columns = ['_'.join(col).strip() if col[1] else col[0] for col in summary.columns.values]
     
     # Stability
-    results_df['Rank'] = results_df.groupby('Fold_Surgeon_Out')['Partial_R2'].rank(ascending=False)
+    col = 'Shuffled_R2' if perform_shuffle else 'Partial_R2'
+    results_df['Rank'] = results_df.groupby('Fold_Surgeon_Out')[col].rank(ascending=False)
     stability_counts = results_df[results_df['Rank'] <= top_n]['Feature'].value_counts()
     stability_score = (stability_counts / len(unique_surgeons)).rename('Selection_Stability')
     

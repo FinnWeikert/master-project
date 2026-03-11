@@ -186,7 +186,6 @@ class SurgicalFeatureExtractor:
 
         return {
             f"total_path_{label}": total_path,
-            f"total_duration_{label}": duration,
             f"mean_velocity_{label}": mean_velocity,
             f"rms_accel_{label}": rms_accel,
             f"ldlj_smoothness_{label}": ldlj,
@@ -229,10 +228,6 @@ class SurgicalFeatureExtractor:
         # 3. Spatial Coordination (Inter-hand Distance)
         dists = np.sqrt((merged["cx_smooth_L"] - merged["cx_smooth_R"])**2 + 
                         (merged["cy_smooth_L"] - merged["cy_smooth_R"])**2)
-        
-        dist_mean = dists.mean()
-        dist_std = dists.std()
-        dist_cv = dist_std / dist_mean if dist_mean > 0 else 0
 
         # RMS of distance change (stability of spacing)
         interhand_dist_change_rms = np.sqrt(np.mean(np.diff(dists)**2))
@@ -242,9 +237,6 @@ class SurgicalFeatureExtractor:
         
         return {
             "velocity_corr": vel_corr,
-            "interhand_dist_mean": dist_mean,
-            "interhand_dist_std": dist_std,
-            "interhand_dist_cv": dist_cv,
             "interhand_dist_change_rms": interhand_dist_change_rms,
             "movement_overlap_ratio": overlap,
             "velocity_ratio": merged["velocity_L"].mean() / (merged["velocity_R"].mean() + 1e-6)

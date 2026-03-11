@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import pandas as pd
 
 
-class HybridAttentionMIL(nn.Module):
+class HybridAttentionMILold(nn.Module):
     def __init__(self, local_dim=1, global_dim=2, attention_hidden_dim=8, 
                  mlp_hidden_dim=8, n_hidden=1, dropout=0.25, 
                  use_feature_extractor=False, temperature=1,
@@ -79,18 +79,123 @@ class HybridAttentionMIL(nn.Module):
         # Dividing by T > 1 makes it "flatter" (more uniform)
         alpha = F.softmax(A_raw / self.temperature, dim=0) 
         
+        if ablation == 'no_attention' or ablation == 'no_attention_and_global':
+            alpha = torch.ones_like(alpha) / alpha.size(0)  # Uniform weights
+
         # C. Aggregate Bag (Weighted Sum)
         bag_embedding = torch.matmul(alpha.T, bag_processed) 
 
         if ablation == 'global_only':
             bag_embedding = torch.zeros_like(bag_embedding)
-        elif ablation == 'mil_only':
+        elif ablation == 'mil_only' or ablation == 'no_attention_and_global':
             global_feat = torch.zeros_like(global_feat)
         
         # D. Fusion & Prediction
         # Ensure correct shapes for concatenation (1, feat_dim)
         fused = torch.cat([bag_embedding, global_feat.view(1, -1)], dim=1)
         score = self.regressor(fused)
+        
+        return score, alpha
+
+
+
+
+class HybridAttentionMIL(nn.Module):
+    def __init__(self, local_dim=1, global_dim=2, attention_hidden_dim=8, 
+                 mlp_hidden_dim=8, n_hidden=1, dropout=0.25, 
+                 use_feature_extractor=False, temperature=1,
+                 feature_extractor_dim=8):
+        super().__init__()
+        self.temperature = temperature
+        
+        # --- LOCAL BRANCH ---
+        if use_feature_extractor:
+            self.feature_extractor = nn.Sequential(
+                nn.Linear(local_dim, feature_extractor_dim),
+                nn.LeakyReLU(),
+                nn.Dropout(dropout)
+            )
+            local_dim = feature_extractor_dim  
+        else:
+            self.feature_extractor = nn.Identity()
+
+        # Attention Mechanism
+        self.attention_V = nn.Sequential(
+            nn.Linear(local_dim, attention_hidden_dim),
+            nn.Tanh()
+        )
+        self.attention_U = nn.Sequential(
+            nn.Linear(local_dim, attention_hidden_dim),
+            nn.Sigmoid()
+        )
+        self.attention_weights = nn.Linear(attention_hidden_dim, 1)
+
+        # Separate processing for the aggregated Local Embedding
+        self.local_head = nn.Sequential(
+            nn.Linear(local_dim, mlp_hidden_dim),
+            nn.LeakyReLU(0.01),
+            nn.Dropout(dropout)
+        )
+
+        # --- GLOBAL BRANCH ---
+        # This branch ensures the global signal is processed on its own 
+        # terms before meeting the local features
+        self.global_head = nn.Sequential(
+            nn.Linear(global_dim, mlp_hidden_dim),
+            nn.LeakyReLU(0.01),
+            nn.Dropout(dropout)
+        )
+
+        # --- FINAL FUSION ---
+        # The heads meet here at the very end
+        self.final_regressor = nn.Linear(mlp_hidden_dim * 2, 1)
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, bag, global_feat, ablation=None):
+        # 1. LOCAL PATHWAY
+        if ablation == 'global_only':
+            # Skip local pathway entirely for speed
+            local_out = torch.zeros((1, self.local_head[0].out_features), device=bag.device)
+            alpha = None # No attention calculated
+        else:
+            bag_processed = self.feature_extractor(bag) 
+            
+            # OPTIMIZATION: Skip attention computation if not needed
+            if ablation in ['no_attention', 'no_attention_and_global']:
+                # Mean Pooling: Simple average across the window dimension
+                bag_embedding = torch.mean(bag_processed, dim=0, keepdim=True)
+                alpha = torch.ones((bag.size(0), 1), device=bag.device) / bag.size(0)
+            else:
+                # Full Attention Mechanism
+                V = self.attention_V(bag_processed) 
+                U = self.attention_U(bag_processed) 
+                G = V * U               
+                A_raw = self.attention_weights(G) 
+                alpha = F.softmax(A_raw / self.temperature, dim=0) 
+                bag_embedding = torch.matmul(alpha.T, bag_processed) # (1, local_dim)
+            
+            # Process local embedding through its dedicated head
+            local_out = self.local_head(bag_embedding) # (1, mlp_hidden_dim)
+
+        # 2. GLOBAL PATHWAY
+        if ablation in ['mil_only', 'no_attention_and_global']:
+            # Skip global processing
+            global_out = torch.zeros((1, self.global_head[0].out_features), device=bag.device)
+        else:
+            # Process global features through its dedicated head
+            global_out = self.global_head(global_feat.view(1, -1)) 
+
+        # 3. FINAL FUSION
+        fused = torch.cat([local_out, global_out], dim=1)
+        score = self.final_regressor(fused)
         
         return score, alpha
     
@@ -129,8 +234,10 @@ def train_one_epoch(model, loader, optimizer, criterion, device, score_scaler=No
             # Metrics for logging
             all_preds.append(score.item())
             all_labels.append(labels[i].item())
-            alpha_ratios.append((alpha.max() / alpha.min()).item())
-            max_alpha_feat_windows.append(bag[alpha.argmax()].cpu().numpy().tolist())
+
+            if alpha is not None:
+                alpha_ratios.append((alpha.max() / alpha.min()).item())
+                max_alpha_feat_windows.append(bag[alpha.argmax()].cpu().numpy().tolist())
 
         # Concatenate all scores into a single tensor [batch_size, 1]
         batch_scores_tensor = torch.cat(batch_scores, dim=0)
@@ -154,9 +261,12 @@ def train_one_epoch(model, loader, optimizer, criterion, device, score_scaler=No
     errors = np.abs(preds_arr - labels_arr)
     mae = np.mean(errors)
 
-    max_alpha_feature_dist = pd.DataFrame(max_alpha_feat_windows, columns=[f"feat_{i}" for i in range(bag.shape[1])]).describe()
-    alpha_ratios_dist = pd.Series(alpha_ratios).describe()
-        
+    if ablation != 'global_only':  # Only calculate if attention was used
+        max_alpha_feature_dist = pd.DataFrame(max_alpha_feat_windows, columns=[f"feat_{i}" for i in range(bag.shape[1])]).describe()
+        alpha_ratios_dist = pd.Series(alpha_ratios).describe()
+    else:
+        max_alpha_feature_dist = None
+        alpha_ratios_dist = None
     return loss, mae, max_alpha_feature_dist, alpha_ratios_dist
 
 def validate_one_epoch(model, loader, criterion, device, label_scaler=None, ablation=None):

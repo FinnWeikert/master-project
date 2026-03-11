@@ -390,6 +390,13 @@ class LandmarksProcessor:
         Chooses the most plausible instance based on proximity to the last known location.
         Removes unrealistic jumps and clears stale hand positions.
         """
+        # -----------------------------
+        # Tunable parameters
+        # -----------------------------
+        EDGE_MARGIN = 25
+        MEMORY_TIMEOUT = 6              # forget a hand after this many missing frames
+        REENTRY_GAP = 15                # after this gap, treat as re-entry
+        NORMAL_COLLISION_RADIUS = 40    # used only to break ties / reject obvious duplicates
 
         df = df.sort_values("frame").reset_index(drop=True)
         cleaned = []
@@ -414,15 +421,15 @@ class LandmarksProcessor:
                     if last_pos[label] is not None:
                         x, y = last_pos[label]
                         if (
-                            x < 25 or
-                            x > self.frame_width - 25 or
-                            y < 25 or
-                            y > self.frame_height - 25
+                            x < EDGE_MARGIN or
+                            x > self.frame_width - EDGE_MARGIN or
+                            y < EDGE_MARGIN or
+                            y > self.frame_height - EDGE_MARGIN
                         ):
                             last_pos[label] = None
 
                     # Timeout clearing
-                    if frame - last_frame[label] > 6:
+                    if frame - last_frame[label] > MEMORY_TIMEOUT:
                         last_pos[label] = None
 
                     continue
@@ -436,7 +443,7 @@ class LandmarksProcessor:
                         ox, oy = last_pos[other_label]
                         hx, hy = row[self.center_col]
 
-                        if np.hypot(hx - ox, hy - oy) < 40:
+                        if np.hypot(hx - ox, hy - oy) < NORMAL_COLLISION_RADIUS:
                             if frame - last_frame[other_label] > 10:
                                 last_pos[other_label] = None
                             continue
@@ -471,7 +478,7 @@ class LandmarksProcessor:
 
                     if dist > self.max_jump_px * frame_gap:
                         # Allow re-init after long gap
-                        if frame_gap > 15:
+                        if frame_gap > REENTRY_GAP:
                             last_pos[label] = row[self.center_col]
                         continue
 
@@ -485,128 +492,12 @@ class LandmarksProcessor:
         return pd.DataFrame(cleaned).reset_index(drop=True)
 
     
-
-    def enforce_hand_label_consistency_conservative(self, df):
-        """
-        Conservative approach: Prioritizes dropping doubtful frames over 
-        interpolating false jumps. Strictly rejects 'Ghost' detections 
-        that appear on top of the other active hand.
-        """
-        # --- CONFIGURATION ---
-        MIN_CONFIDENCE = 0.5       # Drop weak detections immediately
-        COLLISION_RADIUS = 40      # If Left/Right are this close, reject the weaker one
-        REENTRY_COLLISION_GUARD = 50 # Stricter radius when a hand 'reappears' after a gap
-
-        df = df.sort_values("frame").reset_index(drop=True)
-        cleaned = []
-
-        last_pos = {"Left": None, "Right": None}
-        last_frame = {"Left": 0, "Right": 0}
-
-        for frame, group in df.groupby("frame"):
-            frame_entries = []
-
-            # We iterate labels, but checking 'other_label' dynamically 
-            # allows us to compare against the *freshest* data available.
-            for label in ["Left", "Right"]:
-                other_label = "Right" if label == "Left" else "Left"
-                
-                # 1. Filter by Confidence first (Conservative Step)
-                hands = group[(group["hand_label"] == label) & (group["hand_score"] > MIN_CONFIDENCE)]
-
-                # --- CASE A: NO HAND DETECTED ---
-                if len(hands) == 0:
-                    # Check if we should clear history due to edge exit or timeout
-                    if last_pos[label] is not None:
-                        x, y = last_pos[label]
-                        # Edge exit logic
-                        if (x < 25 or x > self.frame_width - 25 or 
-                            y < 25 or y > self.frame_height - 25):
-                            last_pos[label] = None
-                    
-                    # Timeout logic (short memory prevents connecting across huge gaps)
-                    if frame - last_frame[label] > 6:
-                        last_pos[label] = None
-                    continue
-
-                # --- CASE B: CANDIDATE SELECTION ---
-                # Determine the best candidate row
-                if len(hands) == 1:
-                    row = hands.iloc[0]
-                else:
-                    # Multiple candidates: 
-                    # If we have history, pick the one closest to last known pos
-                    if last_pos[label] is not None:
-                        px, py = last_pos[label]
-                        d = hands[self.center_col].apply(lambda c: np.hypot(c[0] - px, c[1] - py))
-                        row = hands.loc[d.idxmin()]
-                    else:
-                        # No history? Pick the highest confidence
-                        row = hands.loc[hands['hand_score'].idxmax()]
-
-                # --- CASE C: CONSERVATIVE VALIDATION (The Fix) ---
-                
-                current_pos = row[self.center_col]
-                valid_candidate = True
-
-                # 1. Check Collision with OTHER Hand (Prevent "Hand Stealing")
-                # We check against the other hand's last known position
-                if last_pos[other_label] is not None:
-                    ox, oy = last_pos[other_label]
-                    dist_to_other = np.hypot(current_pos[0] - ox, current_pos[1] - oy)
-                    
-                    # If we are too close to the other hand, this is suspicious.
-                    if dist_to_other < COLLISION_RADIUS:
-                        # CONSERVATIVE: If we are clashing, drop this current detection.
-                        # It is better to have a gap than a swapped label.
-                        valid_candidate = False
-
-                if not valid_candidate:
-                    continue
-
-                # 2. Check Jumps / Continuity
-                if last_pos[label] is not None:
-                    dx = current_pos[0] - last_pos[label][0]
-                    dy = current_pos[1] - last_pos[label][1]
-                    dist_jump = np.hypot(dx, dy)
-                    frame_gap = frame - last_frame[label]
-
-                    # Threshold: Allow larger jumps only if frame gap is small
-                    max_allowed = 0.5 * self.max_jump_px * (1 + frame_gap)
-                    
-                    if dist_jump > max_allowed:
-                        # --- RE-ENTRY LOGIC ---
-                        # If the gap was long (>15), this might be a valid re-entry.
-                        # BUT, we must ensure it's not a "Ghost" of the other hand.
-                        if frame_gap > 15:
-                            # Re-entry Guard: Only accept if far from other hand
-                            if last_pos[other_label] is not None:
-                                ox, oy = last_pos[other_label]
-                                if np.hypot(current_pos[0]-ox, current_pos[1]-oy) < REENTRY_COLLISION_GUARD:
-                                    # It reappeared right on top of the other hand -> REJECT
-                                    continue
-                            
-                            # If passed guard, accept as new position (teleport allowed on re-entry)
-                            pass 
-                        else:
-                            # Short gap + Huge jump = Noise/Teleport -> REJECT
-                            continue
-
-                # --- ACCEPTANCE ---
-                last_pos[label] = current_pos
-                last_frame[label] = frame
-                frame_entries.append(row)
-
-            cleaned.extend(frame_entries)
-
-        return pd.DataFrame(cleaned).reset_index(drop=True)
-
     # -------------------------------------------------------------------------
     # ------------------- Interpolation ---------------------------------------
     # -------------------------------------------------------------------------
 
 
-    def interpolate_gaps(self, df, max_gap_sec=0.2):
+    def interpolate_gaps(self, df):
         """
         Interpolates short gaps ONLY if the spatial jump is physically plausible.
         """
@@ -632,7 +523,7 @@ class LandmarksProcessor:
         df_merged = pd.concat([df.drop(columns=['landmarks']), df_flat], axis=1)
 
         # --- 2. Identify Gaps and Insert Rows (with Spatial Check) ---
-        max_gap_frames = int(max_gap_sec * self.fps)
+        max_gap_frames = int(self.max_gap_sec * self.fps)
         frame_diffs = df_merged['frame'].diff()
         
         # We look for temporal gaps that are small enough to potentially interpolate
@@ -810,7 +701,7 @@ class LandmarksProcessor:
         df["cy"] = df[self.center_col].apply(lambda p: p[1] if p is not None else np.nan)
         
         # Fill short gaps and smooth
-        df = self.interpolate_gaps(df, max_gap_sec=self.max_gap_sec)
+        df = self.interpolate_gaps(df)
         df = self.generate_segments(df)
         df = self.smooth(df)
 
@@ -829,8 +720,12 @@ class LandmarksProcessor:
             - process left & right independently
             - return unified dataframe
         """
-        if 'bbox_center' in df.columns:
-            df.drop(labels=['bbox_center'], axis=1, inplace=True)
+        df = df.copy()
+        # remove center col that is not used 
+        center_cols = ['palm_center', 'bbox_center']
+        for col in center_cols:
+            if col != self.center_col and col in df.columns:
+                df.drop(labels=[col], axis=1, inplace=True)
 
         landmarks={0, 5, 17}
 
@@ -840,7 +735,7 @@ class LandmarksProcessor:
         )
 
         df = self.swap_labels(df)
-        df = self.enforce_hand_label_consistency_conservative(df)
+        df = self.enforce_hand_label_consistency(df)
 
         left = df[df["hand_label"] == "Left"]
         right = df[df["hand_label"] == "Right"]
@@ -850,3 +745,155 @@ class LandmarksProcessor:
 
         return pd.concat([left, right]).sort_values("frame").reset_index(drop=True)
 
+
+
+
+
+
+# different version can be removed
+
+
+def enforce_hand_label_consistency_hybrid(self, df):
+        """
+        Hybrid hand-label consistency filter.
+
+        Goals:
+        - Keep at most one Left and one Right hand per frame
+        - Prefer temporal continuity once a hand has been established
+        - Allow natural close interactions between hands in normal tracking
+        - Reject suspicious re-entries that appear on top of the other hand
+        - Avoid unnecessary drops caused by overly conservative collision logic
+
+        Assumptions:
+        - Upstream detector already applies a confidence threshold
+        - Upstream detector returns at most 2 hands total per frame
+        """
+
+        # -----------------------------
+        # Tunable parameters
+        # -----------------------------
+        EDGE_MARGIN = 25
+        MEMORY_TIMEOUT = 6              # forget a hand after this many missing frames
+        REENTRY_GAP = 15                # after this gap, treat as re-entry
+        NORMAL_COLLISION_RADIUS = 40    # used only to break ties / reject obvious duplicates
+        REENTRY_COLLISION_GUARD = 50    # stricter guard when reappearing after a long gap
+        MAX_STEP_SCALE = 1.0            # normal jump allowance per frame gap
+
+        df = df.sort_values("frame").reset_index(drop=True)
+        cleaned = []
+
+        last_pos = {"Left": None, "Right": None}
+        last_frame = {"Left": 0, "Right": 0}
+
+        def dist(p1, p2):
+            return np.hypot(p1[0] - p2[0], p1[1] - p2[1])
+
+        def near_edge(pos):
+            x, y = pos
+            return (
+                x < EDGE_MARGIN or
+                x > self.frame_width - EDGE_MARGIN or
+                y < EDGE_MARGIN or
+                y > self.frame_height - EDGE_MARGIN
+            )
+
+        for frame, group in df.groupby("frame"):
+            frame_entries = []
+
+            # Process labels in fixed order; this preserves simple deterministic behavior
+            for label in ["Left", "Right"]:
+                other_label = "Right" if label == "Left" else "Left"
+                hands = group[group["hand_label"] == label]
+
+                # ---------------------------------
+                # CASE A: no detection for this label
+                # ---------------------------------
+                if len(hands) == 0:
+                    if last_pos[label] is not None:
+                        if near_edge(last_pos[label]):
+                            last_pos[label] = None
+
+                    if frame - last_frame[label] > MEMORY_TIMEOUT:
+                        last_pos[label] = None
+
+                    continue
+
+                # ---------------------------------
+                # CASE B: choose best candidate
+                # ---------------------------------
+                if len(hands) == 1:
+                    row = hands.iloc[0]
+
+                else:
+
+                    # 1) Prefer spatial continuity if we have history for this label
+                    if last_pos[label] is not None:
+                        px, py = last_pos[label]
+                        d = hands[self.center_col].apply(
+                            lambda c: np.hypot(c[0] - px, c[1] - py)
+                        )
+                        row = hands.loc[d.idxmin()]
+
+                    # Otherwise fallback to highest score
+                    else:
+                        # 1) If one score clearly dominates, use it
+                        sorted_hands = hands.sort_values("hand_score", ascending=False)
+                        row = sorted_hands.iloc[0]
+
+                    # Optional same-label duplicate suppression:
+                    # if two same-label detections are almost on top of each other,
+                    # keep only the chosen one implicitly by ignoring the other.
+                    # No extra action needed since we only emit one row.
+
+                current_pos = row[self.center_col]
+                frame_gap = frame - last_frame[label] if last_frame[label] != 0 else 1
+                had_history = last_pos[label] is not None
+
+                # ---------------------------------
+                # CASE C: collision sanity check
+                # ---------------------------------
+                # Important: be permissive during normal tracking, stricter on re-entry.
+                if last_pos[other_label] is not None:
+                    d_other = dist(current_pos, last_pos[other_label])
+
+                    # If this hand is reappearing after a long gap, do not allow it
+                    # to "spawn" right on top of the other active hand.
+                    if had_history and frame_gap > REENTRY_GAP:
+                        if d_other < REENTRY_COLLISION_GUARD:
+                            continue
+
+                    # For non-reentry frames, only reject if this candidate is very close
+                    # to the other hand AND this label itself has no recent reliable history.
+                    # This avoids over-dropping real close hand interactions.
+                    elif not had_history and d_other < NORMAL_COLLISION_RADIUS:
+                        continue
+
+                # ---------------------------------
+                # CASE D: jump consistency
+                # ---------------------------------
+                if had_history:
+                    jump_dist = dist(current_pos, last_pos[label])
+                    max_allowed = self.max_jump_px * max(1, frame_gap) * MAX_STEP_SCALE
+
+                    if jump_dist > max_allowed:
+                        # Long-gap re-entry: allow teleport-style reset,
+                        # but only if it passed the collision guard above.
+                        if frame_gap > REENTRY_GAP:
+                            last_pos[label] = current_pos
+                            last_frame[label] = frame
+                            frame_entries.append(row)
+                            continue
+
+                        # Short-gap huge jump = likely noise / swap
+                        continue
+
+                # ---------------------------------
+                # CASE E: accept candidate
+                # ---------------------------------
+                last_pos[label] = current_pos
+                last_frame[label] = frame
+                frame_entries.append(row)
+
+            cleaned.extend(frame_entries)
+
+        return pd.DataFrame(cleaned).reset_index(drop=True)
