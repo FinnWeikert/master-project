@@ -4,7 +4,7 @@ from scipy.stats import pearsonr
 import pandas as pd
 from tqdm import tqdm
 from sklearn.decomposition import PCA
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import RidgeCV
 from sklearn.preprocessing import StandardScaler
 import random
 
@@ -165,7 +165,7 @@ def leakage_free_residual_analysis(
             current_fold_candidates = candidate_features
 
         # --- E. Fit Baseline Model (Train Only) ---
-        baseline_model = Ridge(alpha=0.5)
+        baseline_model = RidgeCV(alphas=np.logspace(-2, 0.5, 20))
         baseline_model.fit(df_fold.loc[train_idx, baseline_cols], y_train)
         
         # Get Predictions for Train (for real analysis)

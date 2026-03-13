@@ -184,20 +184,21 @@ class SurgicalFeatureExtractor:
         frame_span = df["frame"].max() - df["frame"].min()
         frac_tracked = (len(df) / frame_span) if frame_span > 0 else 1.0
 
+        label = 'L' if label == 'Left' else 'R'
         return {
-            f"total_path_{label}": total_path,
-            f"mean_velocity_{label}": mean_velocity,
-            f"rms_accel_{label}": rms_accel,
-            f"ldlj_smoothness_{label}": ldlj,
-            f"nmu_peaks_{label}": nmu,
-            f"efficiency_{label}": efficiency,
-            f"mean_abs_angle_change_{label}": mean_abs_angle,
-            f"angular_dir_switches_{label}": num_reversals,
-            f"total_angular_path_{label}": total_angular_path,
-            f"orientation_entropy_{label}": entropy,
-            f"pose_variability_{label}": pose_var,
-            f"rotation_over_dist_{label}": rot_over_dist,
-            f"fraction_tracked_{label}": frac_tracked
+            f"Total path ({label})": total_path,
+            f"Mean vel. ({label})": mean_velocity,
+            f"Rms accel. ({label})": rms_accel,
+            f"LDLJ smoothness ({label})": ldlj,
+            f"Nmu peaks ({label})": nmu,
+            f"Efficiency ({label})": efficiency,
+            f"Mean ang. change ({label})": mean_abs_angle,
+            f"Angular switches ({label})": num_reversals,
+            f"Total ang. path ({label})": total_angular_path,
+            f"Orientation entropy ({label})": entropy,
+            f"Pose variability ({label})": pose_var,
+            f"Rotation over distance ({label})": rot_over_dist,
+            f"Fraction tracked ({label})": frac_tracked
         }
 
     def _compute_bimanual_metrics(self):
@@ -236,10 +237,10 @@ class SurgicalFeatureExtractor:
         overlap = moving_mask.mean()
         
         return {
-            "velocity_corr": vel_corr,
-            "interhand_dist_change_rms": interhand_dist_change_rms,
-            "movement_overlap_ratio": overlap,
-            "velocity_ratio": merged["velocity_L"].mean() / (merged["velocity_R"].mean() + 1e-6)
+            "Velocity corr.": vel_corr,
+            "Interhand dist. change RMS": interhand_dist_change_rms,
+            "Movement overlap ratio": overlap,
+            "Velocity ratio": merged["velocity_L"].mean() / (merged["velocity_R"].mean() + 1e-6)
         }
     
     def _count_reversals_sofisticated(self, df):
