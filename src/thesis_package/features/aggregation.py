@@ -30,9 +30,8 @@ def aggregate_window_features(df_windows, p=90, active_with_idle=True):
     # A. Magnitude Features (Where the 'Average' matters)
     #    Velocity, Spacing, Ang Velocity
     possible_feats = [
-        'zvr', 'vel_p90', 'spatial_spread', 
-        'jerk', 'curvature', 'path_ratio', 
-        'sparc', 'palm_area_cv',
+        'spatial_spread', 'acc_rms', 'hf_ratio', 'path_ratio', 
+        'sparc', 'palm_area_cv', 'speed_peaks'
     ]
     
     # Filter lists to ensure columns actually exist

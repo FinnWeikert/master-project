@@ -7,6 +7,8 @@ from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 from sklearn.linear_model import RidgeCV
 from scipy.stats import pearsonr, spearmanr
+from scipy.optimize import linear_sum_assignment
+from sklearn.metrics.pairwise import euclidean_distances
 
 
 def loso_correlation_analysis(
@@ -261,10 +263,11 @@ def loso_residual_analysis(
 
 
 def permutation_significance_test(
-    df_full, 
+    df, 
     top_features_right, 
     candidate_features, 
     real_val,
+    extra_Features=None,
     n_shuffles=500, 
     top_n=1,
     show_plot=True,
@@ -283,9 +286,10 @@ def permutation_significance_test(
     for seed in tqdm(range(n_shuffles)):
         # Call your existing analysis function with shuffle enabled
         df_res = loso_residual_analysis(
-            df_full, 
-            top_features_right, 
-            candidate_features, 
+            df, 
+            top_features_right,
+            candidate_features,
+            base_features=extra_Features,
             top_n=top_n, 
             perform_shuffle=True, 
             seed=seed
@@ -333,3 +337,62 @@ def permutation_significance_test(
         'vel_corr_null': vel_corr_null,
         'stability_null': stability_null
     }
+
+
+def get_top_correlations(df, scores, top_n=15):
+    """
+    Computes Pearson and Spearman correlations between df columns and scores,
+    then prints the top N features based on absolute Pearson correlation.
+    """
+    features = df.columns
+    pearson_corrs = []
+    spearman_corrs = []
+
+    for col in features:
+        p_corr, _ = pearsonr(df[col], scores)
+        s_corr, _ = spearmanr(df[col], scores)
+        pearson_corrs.append(p_corr)
+        spearman_corrs.append(s_corr)
+
+    # Get indices of top_n features sorted by absolute Pearson correlation
+    top_indices = np.argsort(np.abs(pearson_corrs))[::-1][:top_n]
+
+    print(f"Top {top_n} features by Pearson correlation:")
+    for idx in top_indices:
+        print(f"{features[idx]:<30} Pearson r = {pearson_corrs[idx]:.4f}, "
+              f"Spearman rho = {spearman_corrs[idx]:.4f}")
+    
+    return pearson_corrs, spearman_corrs
+
+
+# BoW Cluster Alignment 
+
+def align_fold_centroids(global_centroids, fold_centroids_list):
+    """
+    global_centroids: (K, 4) array from K-Means on the full dataset.
+    fold_centroids_list: A list of (K, 4) arrays, one for each of your 28 LOSO folds.
+    """
+    aligned_data = []
+    K = global_centroids.shape[0]
+
+    for fold_idx, f_cents in enumerate(fold_centroids_list):
+        # 1. Compute distance matrix between Global and this Fold's centroids
+        # cost_matrix[i, j] is the distance between Global Cluster i and Fold Cluster j
+        cost_matrix = euclidean_distances(global_centroids, f_cents)
+        
+        # 2. Find the optimal one-to-one mapping (Hungarian Algorithm)
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        
+        # 3. Reorder the fold centroids to match the global template order
+        # col_ind tells us which index in f_cents matches 0, 1, 2... in global
+        for i, j in zip(row_ind, col_ind):
+            aligned_data.append({
+                'fold': fold_idx,
+                'cluster_id': i,  # This is the "Global Name"
+                'path_ratio': f_cents[j, 0],
+                'spatial_spread': f_cents[j, 1],
+                'palm_area_cv': f_cents[j, 2],
+                'sparc': f_cents[j, 3]
+            })
+            
+    return pd.DataFrame(aligned_data)

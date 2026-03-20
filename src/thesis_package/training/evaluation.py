@@ -411,15 +411,17 @@ class LOSOEvaluator:
         summary = _metrics(all_true, all_preds, n_features=len(feature_names))
 
         if weight_tables:
-            merged = weight_tables[0]
-            for wt in weight_tables[1:]:
-                merged = merged.merge(wt, on="Feature", how="outer")
-            weight_cols = [c for c in merged.columns if c.startswith("Fold_")]
+            # Set 'Feature' as the index for all dataframes to align them automatically
+            indexed_tables = [df.set_index("Feature") for df in weight_tables]
+            
+            # Join them all at once (axis=1 is like a multi-way outer join)
+            merged = pd.concat(indexed_tables, axis=1)
+            
+            # Calculate stats directly on the columns
             weight_report = pd.DataFrame({
-                "Feature": merged["Feature"],
-                "Average_Weight": merged[weight_cols].mean(axis=1),
-                "Std_Weight": merged[weight_cols].std(axis=1)
-            })
+                "Average_Weight": merged.mean(axis=1),
+                "Std_Weight": merged.std(axis=1)
+            }).reset_index() # Bring 'Feature' back as a column
         else:
             weight_report = None
 

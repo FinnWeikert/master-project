@@ -149,5 +149,66 @@ def plot_panel_b_intercorrelation_heatmap(
 
 
 ##############################################################################################################################################
-############################################################## Global Features ###############################################################
+############################################################## Winodw Features ###############################################################
 ##############################################################################################################################################
+
+def plot_sensitivity_results(cluster_range, results_dict, title="Cluster Sensitivity Analysis", base_corr=0.7165, base_mae=5.2231, base_r2=0.5021):
+    """
+    Plots mean performance metrics with standard deviation bands across multiple seeds.
+    
+    Parameters:
+    -----------
+    cluster_range : range or list
+        The x-axis values (number of clusters).
+    results_dict : dict
+        The nested dictionary containing 'MAE', 'Corr', and 'R2' with seed-specific lists.
+    """
+    n_seeds = len(list(results_dict['R2'].values())[0])
+    cluster_list = list(cluster_range)
+    
+    # Helper to calculate stats
+    def get_stats(metric_dict):
+        # Convert dict of lists to a 2D array: (seeds, n_clusters)
+        arr = np.array([metric_dict[cluster] for cluster in cluster_range])
+        return np.mean(arr, axis=1), np.std(arr, axis=1)
+
+    # Calculate statistics
+    r2_mean, r2_std = get_stats(results_dict['R2'])
+    corr_mean, corr_std = get_stats(results_dict['Spearman_R'])
+    mae_mean, mae_std = get_stats(results_dict['MAE'])
+
+    # Create Subplots
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(f"{title} ({n_seeds} Seeds)", fontsize=16, fontweight='bold', y=1.05)
+
+    metrics = [
+        ('Overall R²', r2_mean, r2_std, 'royalblue', base_r2),
+        ('Spearman Correlation', corr_mean, corr_std, 'forestgreen', base_corr),
+        ('Overall MAE', mae_mean, mae_std, 'crimson', base_mae)
+    ]
+
+    for i, (label, mean, std, color, base_value) in enumerate(metrics):
+        ax = axes[i]
+        
+        # Plot mean line
+        ax.plot(cluster_list, mean, color=color, marker='o', markersize=4, label='Mean', linewidth=2)
+        
+        # Plot standard deviation band
+        ax.fill_between(cluster_list, mean - std, mean + std, color=color, alpha=0.2, label='±1 Std Dev')
+        
+        # Formatting
+        ax.set_title(label, fontsize=14)
+        ax.set_xlabel('Number of Clusters', fontsize=12)
+        ax.set_ylabel('Metric Value', fontsize=12)
+        ax.set_xticks(list(cluster_range)[::2])
+        ax.grid(True, linestyle='--', alpha=0.6)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        ax.axhline(base_value, color='gray', linestyle='--', label=f'Baseline', alpha=0.7)
+        
+        if i == 0: # Only one legend to keep it clean
+            ax.legend()
+
+    plt.tight_layout()
+    plt.show()
