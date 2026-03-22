@@ -73,6 +73,13 @@ def draw_hands(df_hand_left, df_hand_right, title="Hand Trajectories", backgroun
     plt.legend(handles=legend_handles, bbox_to_anchor=(0.8, 0.98))#, loc='upper left')
 
     plt.tight_layout()
+
+    plt.savefig(
+        "trajectories.pdf",
+        bbox_inches="tight",
+        dpi=300
+    )
+    
     plt.show()
 
 
