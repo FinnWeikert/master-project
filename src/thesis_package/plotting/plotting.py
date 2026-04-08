@@ -7,6 +7,7 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 ##############################################################################################################################################
 ############################################################## Global Features ###############################################################
@@ -152,6 +153,28 @@ def plot_panel_b_intercorrelation_heatmap(
 ############################################################## Winodw Features ###############################################################
 ##############################################################################################################################################
 
+def plot_correlation_matrix(df, title="Feature Correlation Matrix"):
+    # Calculate the correlation matrix
+    corr = df.corr()
+
+    # Set up the matplotlib figure
+    plt.figure(figsize=(10, 8))
+
+    # Create the heatmap
+    sns.heatmap(corr, 
+                annot=True,          # Show the correlation values
+                fmt=".2f",           # Format to 2 decimal places
+                cmap='coolwarm',     # Standard diverging colormap
+                center=0,            # Ensure 0 is the neutral color
+                square=True,         # Force square cells
+                linewidths=.5,       # Add small lines between cells
+                cbar_kws={"shrink": .8})
+
+    plt.title(title, fontsize=16)
+    plt.xticks(rotation=45, ha='right')
+    plt.show()
+
+
 def plot_sensitivity_results(cluster_range, results_dict, title="Cluster Sensitivity Analysis", base_corr=0.7165, base_mae=5.2231, base_r2=0.5021):
     """
     Plots mean performance metrics with standard deviation bands across multiple seeds.
@@ -212,3 +235,135 @@ def plot_sensitivity_results(cluster_range, results_dict, title="Cluster Sensiti
 
     plt.tight_layout()
     plt.show()
+
+###############################################################################################################################################
+############################################################## Predicted vs. True Plots #######################################################
+###############################################################################################################################################
+
+def plot_predicted_vs_true(
+    df,
+    true_col="True",
+    pred_col="Pred",
+    group_col="Group",
+    title="Predicted vs. True GRS",
+    ax=None,
+    show_group_labels=False,
+    annotate_metrics=True,
+    add_fit_line=True,
+    point_alpha=0.6,
+    point_size=50,
+):
+    """
+    Plot predicted vs. true scores for a single model.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must contain columns for true and predicted values.
+    true_col : str
+        Name of the column with ground-truth scores.
+    pred_col : str
+        Name of the column with predicted scores.
+    group_col : str
+        Optional grouping/sample identifier column.
+    title : str
+        Plot title.
+    ax : matplotlib.axes.Axes or None
+        If provided, draw on this axis. Otherwise create a new figure.
+    show_group_labels : bool
+        If True, annotate each point with the value in `group_col`.
+    annotate_metrics : bool
+        If True, show R², RMSE, MAE, and Pearson r in the plot.
+    add_fit_line : bool
+        If True, add a least-squares regression line.
+    point_alpha : float
+        Alpha transparency for scatter points.
+    point_size : float
+        Scatter point size.
+
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+        The axis containing the plot.
+    metrics : dict
+        Dictionary with computed metrics.
+    """
+    data = df[[true_col, pred_col] + ([group_col] if group_col in df.columns else [])].dropna().copy()
+
+    y_true = data[true_col].to_numpy()
+    y_pred = data[pred_col].to_numpy()
+
+    # Metrics
+    r2 = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    spearman_r, _ = spearmanr(y_true, y_pred)
+
+    metrics = {
+        "R2": r2,
+        "MAE": mae,
+        "Spearman_r": spearman_r,
+    }
+
+    # Create axis if needed
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 6))
+
+    # Scatter
+    ax.scatter(y_true, y_pred, s=point_size, alpha=point_alpha, edgecolors='w', linewidths=0.5)
+
+    # Axis limits with small margin
+    combined = np.concatenate([y_true, y_pred])
+    data_min = np.min(combined)
+    data_max = np.max(combined)
+    margin = 0.05 * (data_max - data_min) if data_max > data_min else 1.0
+    lim_min = data_min - margin
+    lim_max = data_max + margin
+
+    # Identity line
+    ax.plot([lim_min, lim_max], [lim_min, lim_max], linestyle="--", linewidth=1.0, color="gray", label="Ideal: y = x")
+
+    # Fitted regression line
+    if add_fit_line and len(data) >= 2:
+        slope, intercept = np.polyfit(y_true, y_pred, 1)
+        x_fit = np.linspace(lim_min, lim_max, 200)
+        y_fit = slope * x_fit + intercept
+        ax.plot(x_fit, y_fit, linewidth=1.5, label=f"Fit: y = {slope:.2f}x + {intercept:.2f}")
+
+    # Optional point labels
+    if show_group_labels and group_col in data.columns:
+        for _, row in data.iterrows():
+            ax.annotate(
+                str(row[group_col]),
+                (row[true_col], row[pred_col]),
+                xytext=(4, 4),
+                textcoords="offset points",
+                fontsize=8,
+            )
+
+    # Labels and styling
+    ax.set_title(title)
+    ax.set_xlabel("True GRS (mean expert score)")
+    ax.set_ylabel("Predicted GRS")
+    ax.set_xlim(lim_min, lim_max)
+    ax.set_ylim(lim_min, lim_max)
+    ax.set_aspect("equal", adjustable="box")
+    #ax.grid(True, alpha=0.3)
+
+    if annotate_metrics:
+        text = (
+            f"$R^2$ = {r2:.3f}\n"
+            f"MAE = {mae:.2f}\n"
+            f"ρ = {spearman_r:.3f}\n"
+            f"n = {len(data)}"
+        )
+        ax.text(
+            0.05,
+            0.95,
+            text,
+            transform=ax.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", alpha=0.1),
+        )
+
+    ax.legend(loc="lower right")
+    return ax, metrics

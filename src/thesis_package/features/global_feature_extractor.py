@@ -186,6 +186,7 @@ class SurgicalFeatureExtractor:
 
         label = 'L' if label == 'Left' else 'R'
         return {
+            f"Total duration ({label})": duration,
             f"Total path ({label})": total_path,
             f"Mean vel. ({label})": mean_velocity,
             f"Rms accel. ({label})": rms_accel,

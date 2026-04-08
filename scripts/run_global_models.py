@@ -141,11 +141,13 @@ def main() -> None:
 
     # Select right-hand features
     right_features = [col for col in df_full.columns if "(R)" in col]
+    right_features.remove('Total duration (R)')
+
     if not right_features:
         raise ValueError("No right-hand features found. Check feature extraction output.")
 
     # Case dummy columns (sorted for deterministic order)
-    case_cols = sorted([col for col in df_full.columns if col.startswith("Case_")])
+    case_cols = ['Case_1', 'Case_2', 'Case_3']
 
     # ---------------- Evaluator ----------------
     evaluator = LOSOEvaluator(
@@ -169,8 +171,8 @@ def main() -> None:
         primary_feature_corr_threshold=0.5,
         verbose=False,
     )
-    print_performance(ridge_pc1_results, "RidgeCV with PC1 only")
-    results_rows.append(build_results_row("PC1 only (Ridge)", ridge_pc1_results))
+    print_performance(ridge_pc1_results, "Linear with PC1 only")
+    results_rows.append(build_results_row("PC1 only (Linear)", ridge_pc1_results))
 
     # ---------------- Ridge: PC1 + case type ----------------
     if case_cols:
@@ -207,6 +209,22 @@ def main() -> None:
     else:
         print("Warning: 'Velocity corr.' column not found. Skipping velocity-correlation model.\n")
 
+    # ---------------- Linear: Duration only ----------------
+    velocity_corr_col = "Velocity corr."
+    if velocity_corr_col in df_full.columns:
+        ridge_pc1_velcorr_results = evaluator.evaluate_tabular(
+            df=df_full,
+            primary_features=['Total duration (R)'],
+            model=RidgeCV(alphas=np.logspace(-1, 0.5, 20)),
+            verbose=False,
+        )
+        print_performance(ridge_pc1_velcorr_results, "Linear Task Duration ")
+        results_rows.append(
+            build_results_row("Duration (Linear)", ridge_pc1_velcorr_results)
+        )
+    else:
+        print("Warning: 'Velocity corr.' column not found. Skipping velocity-correlation model.\n")
+        
     # ---------------- MLP: PC1 + case type ----------------
     if case_cols:
         print("Evaluating MLP ensemble with PC1 + case type...")

@@ -1,7 +1,8 @@
 import numpy as np
+import os
 import pandas as pd
 import torch
-
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, Any
 from tqdm import tqdm
@@ -453,26 +454,13 @@ class LOSOEvaluator:
         mil_feature_scaler_cls,
         n_ensemble=3,
         test_size=1,
-        epochs=600,
         log_feats=None,
-        plot=False,
         training_mode="direct",
         model_kwargs=None,
         train_kwargs=None,
+        load_path=None,
+        save_models=False
     ):
-        """
-        Unifies:
-        - run_cv_mil_direct_ensemble
-        - run_cv_mil_two_phase
-
-        Required external pieces are injected:
-        - mil_dataset_cls
-        - mil_model_cls
-        - train_fn                  (run_training_unbiased or run_training_two_phase)
-        - mil_feature_scaler_cls    (your MILFeatureScaler)
-
-        training_mode is only informational here; behavior comes from train_fn/train_kwargs.
-        """
         log_feats = log_feats or []
         model_kwargs = model_kwargs or {}
         train_kwargs = train_kwargs or {}
@@ -486,7 +474,17 @@ class LOSOEvaluator:
         all_preds, all_true = [], []
         fold_rows = []
 
-        for fold_idx, (train_groups, test_groups) in enumerate(tqdm(splits, desc="MIL CV"), start=1):
+        # 1. Check for existing weights
+        saved_data = None
+        if load_path and os.path.exists(load_path):
+            print(f"Loading pre-trained models from {load_path}...")
+            saved_data = torch.load(load_path, map_location=self.cfg.device, weights_only=True)
+        
+        # 2. Storage for weights if training and saving is requested
+        new_weights_to_save = {"folds": {}} if (save_models and load_path) else None
+
+        for fold_idx, (train_groups, test_groups) in enumerate(splits, start=1):
+            print(f"Fold {fold_idx}/{len(splits)} - Test Surgeons: {test_groups}")
             df_g_train, df_g_test = _split_df(df_global, self.cfg.surgeon_col, train_groups, test_groups)
 
             train_videos = set(df_g_train[self.cfg.video_col])
@@ -517,54 +515,47 @@ class LOSOEvaluator:
 
             global_input_cols = ["pca_feat"] + cont_additional + dummy_cols
 
-            mil_scaler = mil_feature_scaler_cls(
-                feature_cols=window_feature_cols,
-                log_features=log_feats,
-                method="robust",
-            )
-            mil_scaler.fit(df_w_train)
+            mil_scaler = mil_feature_scaler_cls(feature_cols=window_feature_cols, log_features=log_feats, method="robust")
+            mil_scaler.fit(df_w_train, verbose=False)
             w_train_s = mil_scaler.transform(df_w_train)
             w_test_s = mil_scaler.transform(df_w_test)
 
-            train_ds = mil_dataset_cls(
-                w_train_s, df_g_train, window_feature_cols, global_input_cols, label_col="target_scaled"
-            )
-            test_ds = mil_dataset_cls(
-                w_test_s, df_g_test, window_feature_cols, global_input_cols, label_col="target_scaled"
-            )
+            train_ds = mil_dataset_cls(w_train_s, df_g_train, window_feature_cols, global_input_cols, label_col="target_scaled")
+            test_ds = mil_dataset_cls(w_test_s, df_g_test, window_feature_cols, global_input_cols, label_col="target_scaled")
 
-            train_loader = torch.utils.data.DataLoader(
-                train_ds, batch_size=len(train_ds), shuffle=True, collate_fn=train_ds.mil_collate_fn
-            )
-            test_loader = torch.utils.data.DataLoader(
-                test_ds, batch_size=1, shuffle=False, collate_fn=test_ds.mil_collate_fn
-            )
+            train_loader = torch.utils.data.DataLoader(train_ds, batch_size=len(train_ds), shuffle=True, collate_fn=train_ds.mil_collate_fn)
+            test_loader = torch.utils.data.DataLoader(test_ds, batch_size=1, shuffle=False, collate_fn=test_ds.mil_collate_fn)
 
             ensemble_preds = []
+            fold_ensemble_weights = []
+
             for i in range(n_ensemble):
                 torch.manual_seed(self.cfg.seed + i)
-
-                model = mil_model_cls(
+                
+                mil_model = mil_model_cls(
                     local_dim=len(window_feature_cols),
                     global_dim=len(global_input_cols),
                     **model_kwargs
                 ).to(self.cfg.device)
 
-                model, history = train_fn(
-                    model=model,
-                    train_loader=train_loader,
-                    test_loader=test_loader,
-                    epochs=epochs,
-                    score_scaler=score_scaler,
-                    verbose=False,
-                    **train_kwargs,
-                )
-
-                if plot:
-                    try:
-                        plot_training_history(pd.DataFrame(history))
-                    except Exception:
-                        pass
+                if saved_data:
+                    # Use stored weights
+                    weights = saved_data["folds"][fold_idx]["ensemble_weights"][i]
+                    mil_model.load_state_dict(weights)
+                    model = mil_model 
+                else:
+                    # Normal training path
+                    print(f"  Training Ensemble member {i+1}/{n_ensemble}...")
+                    model, history = train_fn(
+                        model=mil_model,
+                        train_loader=train_loader,
+                        test_loader=test_loader,
+                        score_scaler=score_scaler,
+                        verbose=False,
+                        **train_kwargs,
+                    )
+                    if new_weights_to_save is not None:
+                        fold_ensemble_weights.append(deepcopy(model.state_dict()))
 
                 model.eval()
                 cur_preds = []
@@ -575,15 +566,15 @@ class LOSOEvaluator:
                             b_globs[0].unsqueeze(0).to(self.cfg.device),
                             ablation=train_kwargs.get("ablation", None),
                         )
-                        pred = score_scaler.inverse_transform(
-                            pred_scaled.detach().cpu().numpy().reshape(-1, 1)
-                        ).ravel()[0]
+                        pred = score_scaler.inverse_transform(pred_scaled.detach().cpu().numpy().reshape(-1, 1)).ravel()[0]
                         cur_preds.append(pred)
 
                 ensemble_preds.append(np.array(cur_preds))
 
-            avg_preds = np.mean(ensemble_preds, axis=0)
+            if new_weights_to_save is not None:
+                new_weights_to_save["folds"][fold_idx] = {"ensemble_weights": fold_ensemble_weights}
 
+            avg_preds = np.mean(ensemble_preds, axis=0)
             all_preds.extend(avg_preds)
             all_true.extend(y_test_raw)
 
@@ -594,13 +585,20 @@ class LOSOEvaluator:
                 "Test_Pearson": _safe_pearson(y_test_raw, avg_preds),
                 "Test_Spearman": _safe_spearman(y_test_raw, avg_preds),
             })
+        
+            print(f"\nFold Ensemble Test MAE: {mean_absolute_error(y_test_raw, avg_preds):.4f}")
+            print("=======================================")
+
+        # 3. Final save logic
+        if new_weights_to_save is not None and not saved_data:
+            print(f"Saving all trained models to {load_path}...")
+            torch.save(new_weights_to_save, load_path)
 
         return {
             "summary": _metrics(all_true, all_preds),
             "fold_results": pd.DataFrame(fold_rows),
             "predictions": pd.DataFrame({"True": all_true, "Pred": all_preds}),
         }
-
     # -----------------------------------------------------
     # 3) VOCABULARY LOSO
     # -----------------------------------------------------

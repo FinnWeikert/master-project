@@ -110,5 +110,5 @@ class KinematicVocabulary:
             bow_vector = np.mean(probs, axis=0)
             video_features.append(bow_vector)
             
-        cols = [f'SurgeMe_{i}' for i in range(self.n_clusters)]
+        cols = [f'BoW_feat_{i}' for i in range(self.n_clusters)]
         return pd.DataFrame(video_features, columns=cols, index=vids)

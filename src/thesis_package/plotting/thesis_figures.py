@@ -62,8 +62,8 @@ def plot_combined_feature_screening_figure(
     ax_bar.set_yticklabels(df_corr["feature"])
     ax_bar.set_ylim(n_features, 0)
     ax_bar.grid(axis="x", linestyle="--", alpha=0.7)
+    ax_bar.set_xlabel(r"Spearman $|\rho|$ with GRS")
 
-    ax_bar.set_xlabel(r"$|r|$ with GRS")
     #ax_bar.axvline(strong_threshold, linestyle="--", color="gray")
 
     # separation line
@@ -73,8 +73,8 @@ def plot_combined_feature_screening_figure(
 
     # Add a custom legend to explain the colors
     legend_elements = [
-        Patch(facecolor='#4C78A8', label='Positive Corr (> 0)'),
-        Patch(facecolor='#E45756', label='Negative Corr (< 0)')
+        Patch(facecolor='#4C78A8', label=r'Positive $\rho$ (> 0)'),
+        Patch(facecolor='#E45756', label=r'Negative $\rho$ (< 0)')
     ]
     ax_bar.legend(handles=legend_elements, loc='lower right', fontsize=10)
 
@@ -188,26 +188,21 @@ def plot_single_metric_sensitivity(cluster_range, results_dict, metric='R2', bas
 
 # BoW Selection SurgeMe interpretation
 
-def plot_surgeme_stability(df_stability, global_centroids):
+def plot_surgeme_stability(df_stability, global_centroids, title="Kinematic Stability of BoW Centroids Across 28 LOSO Folds", save_fig=False):
     """
-    Plots a 2x2 grid of boxplots showing the stability of each kinematic 
-    feature across the 28 LOSO folds for each cluster and overlays the
-    global centroid value as a black dot.
+    Plots a 2x2 grid of boxplots with selective axis labels and optional title.
     """
     features = ['path_ratio', 'spatial_spread', 'palm_area_cv', 'sparc']
-    
     titles = ['Path Ratio (Efficiency)', 'Spatial Spread (Economy)', 
               'SPARC (Smoothness)', 'Palm Area CV (Pose Stability)']
     
     sns.set_context("paper", font_scale=1.2)
     plt.style.use("seaborn-v0_8-whitegrid")
     
-    fig, axes = plt.subplots(2, 2, figsize=(12,8.5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8.5), sharex=False, sharey=False)
     axes = axes.flatten()
 
     for i, feat in enumerate(features):
-
-        # Boxplots across folds
         sns.boxplot(
             data=df_stability,
             x='cluster_id',
@@ -220,44 +215,47 @@ def plot_surgeme_stability(df_stability, global_centroids):
             linewidth=1.2
         )
 
-        # Mean indicator
-        """sns.pointplot(
-            data=df_stability,
-            x='cluster_id',
-            y=feat,
-            ax=axes[i],
-            color='red',
-            markersize=4,
-            linestyle='none',
-            errorbar=None,
-            estimator=np.mean
-        )"""
-
-        # ---- GLOBAL CENTROID DOT ----
+        # Global Centroid Dot
         x_positions = np.arange(global_centroids.shape[0])
         y_positions = global_centroids[:, i]
-
         axes[i].scatter(
-            x_positions,
-            y_positions,
-            color="red",
-            s=20,
-            marker="D",
-            label="Global centroid",
-            zorder=10
+            x_positions, y_positions,
+            color="red", s=20, marker="D",
+            label="Global centroid", zorder=10
         )
 
         axes[i].set_title(titles[i], fontweight='bold', pad=10)
-        axes[i].set_xlabel("Surgeme (Global Cluster ID)")
-        axes[i].set_ylabel("Feature Value")
+
+        # --- SELECTIVE AXIS LABELS ---
+        # Only set Y-label for the left column (index 0 and 2)
+        if i % 2 == 0:
+            axes[i].set_ylabel("Feature Value")
+        else:
+            axes[i].set_ylabel("")
+
+        # Only set X-label for the bottom row (index 2 and 3)
+        if i >= 2:
+            axes[i].set_xlabel("Surgeme (Global Cluster ID)")
+        else:
+            axes[i].set_xlabel("")
 
     plt.tight_layout()
-    plt.subplots_adjust(top=0.92)
-    fig.suptitle("Kinematic Stability of Surgeme Vocabulary Across 28 LOSO Folds", fontsize=16)
+    
+    # --- CONDITIONAL TITLE ---
+    if title is not None:
+        plt.subplots_adjust(top=0.92)
+        fig.suptitle(title, fontsize=16)
 
     # Show legend once
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper right")
+
+    if save_fig:
+        plt.savefig(
+            "bow_loso_stability.pdf",
+            bbox_inches="tight",
+            dpi=300
+        )
 
     plt.show()
 
@@ -288,7 +286,7 @@ def plot_surgeme_radar(global_centroids, feature_labels, cluster_info):
         values = np.asarray(global_centroids[idx]).tolist()
         values += values[:1]
 
-        label = f"SurgeMe {idx} | β = {info['coef']:.2f}"
+        label = f"BoW feature {idx} | β = {info['coef']:.2f}"
         
         # --- Z-ORDER LOGIC SWITCHED ---
         # First item (i=0) gets zorder 10, second gets 9, etc.
