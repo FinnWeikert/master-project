@@ -8,6 +8,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from scipy.stats import pearsonr, spearmanr
+from pathlib import Path
+from sklearn.metrics import r2_score, mean_absolute_error
+
 
 def plot_combined_feature_screening_figure(
     df_full,
@@ -345,3 +348,186 @@ def plot_surgeme_radar(global_centroids, feature_labels, cluster_info):
     plt.tight_layout()
     plt.savefig("radar_plot.pdf", bbox_inches="tight", dpi=300)
     plt.show()
+
+
+def plot_two_predicted_vs_true(
+    df_left,
+    df_right,
+    true_col="True",
+    pred_col="Pred",
+    left_title="(a) PC1 linear baseline",
+    right_title="(b) Diagnostic hybrid model",
+    figure_title=None,
+    annotate_metrics=True,
+    point_alpha=0.6,
+    point_size=50,
+    figsize=(12, 6),
+    save_path="predicted_vs_true_comparison.png",
+    dpi=300,
+    save_pdf=True,
+):
+    """
+    Plot two predicted-vs-true scatterplots side by side with shared axes and save
+    the figure in high quality.
+
+    Parameters
+    ----------
+    df_left : pandas.DataFrame
+        Data for the left subplot. Must contain true_col and pred_col.
+    df_right : pandas.DataFrame
+        Data for the right subplot. Must contain true_col and pred_col.
+    true_col : str
+        Name of the column with ground-truth scores.
+    pred_col : str
+        Name of the column with predicted scores.
+    left_title : str
+        Title for the left subplot.
+    right_title : str
+        Title for the right subplot.
+    figure_title : str or None
+        Optional overall figure title.
+    annotate_metrics : bool
+        If True, show R², MAE, Spearman rho, and n in each subplot.
+    point_alpha : float
+        Alpha transparency for scatter points.
+    point_size : float
+        Scatter point size.
+    figsize : tuple
+        Figure size in inches.
+    save_path : str
+        Output path for the main saved figure (typically .png).
+    dpi : int
+        Resolution for raster output.
+    save_pdf : bool
+        If True, also save a vector PDF version alongside the main file.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The created figure.
+    axes : np.ndarray
+        Array of subplot axes.
+    metrics : dict
+        Metrics for both panels.
+    """
+
+    def _prepare_data(df):
+        data = df[[true_col, pred_col]].dropna().copy()
+        y_true = data[true_col].to_numpy()
+        y_pred = data[pred_col].to_numpy()
+
+        metrics = {
+            "R2": r2_score(y_true, y_pred),
+            "MAE": mean_absolute_error(y_true, y_pred),
+            "Spearman_r": spearmanr(y_true, y_pred)[0],
+            "n": len(data),
+        }
+        return data, y_true, y_pred, metrics
+
+    # Prepare both datasets
+    data_left, y_true_left, y_pred_left, metrics_left = _prepare_data(df_left)
+    data_right, y_true_right, y_pred_right, metrics_right = _prepare_data(df_right)
+
+    # Shared axis limits across both panels
+    combined = np.concatenate([
+        y_true_left, y_pred_left,
+        y_true_right, y_pred_right
+    ])
+    data_min = np.min(combined)
+    data_max = np.max(combined)
+    margin = 0.05 * (data_max - data_min) if data_max > data_min else 1.0
+    lim_min = data_min - margin
+    lim_max = data_max + margin
+
+    # Create figure with shared axes
+    fig, axes = plt.subplots(
+        1, 2,
+        figsize=figsize,
+        sharex=True,
+        sharey=True,
+        constrained_layout=True
+    )
+
+    panels = [
+        (axes[0], y_true_left, y_pred_left, left_title, metrics_left),
+        (axes[1], y_true_right, y_pred_right, right_title, metrics_right),
+    ]
+
+    panel_labels = ["(a)", "(b)"]
+
+    for i, (ax, y_true, y_pred, title, metrics) in enumerate(panels):
+        ax.scatter(
+            y_true,
+            y_pred,
+            s=point_size,
+            alpha=point_alpha,
+            edgecolors="w",
+            linewidths=0.5,
+        )
+
+        # Identity line
+        ax.plot(
+            [lim_min, lim_max],
+            [lim_min, lim_max],
+            linestyle="--",
+            linewidth=1.0,
+            color="gray",
+        )
+
+        # PANEL LABEL
+        ax.text(
+            0.015, 0.985, panel_labels[i],
+            transform=ax.transAxes,
+            fontsize=12,
+            fontweight="bold",
+            verticalalignment="top",
+            horizontalalignment="left"
+        )
+
+        # Title WITHOUT (a)/(b)
+        ax.set_title(title)
+
+        ax.set_xlim(lim_min, lim_max)
+        ax.set_ylim(lim_min, lim_max)
+        ax.set_aspect("equal", adjustable="box")
+
+        if annotate_metrics:
+            text = (
+                f"$R^2$ = {metrics['R2']:.2f}\n"
+                f"MAE = {metrics['MAE']:.2f}\n"
+                f"$\\rho$ = {metrics['Spearman_r']:.2f}\n"
+                f"n = {metrics['n']}"
+            )
+            ax.text(
+                0.06,
+                0.94,
+                text,
+                transform=ax.transAxes,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", alpha=0.1),
+            )
+
+    # Shared labels
+    axes[0].set_ylabel("Predicted GRS")
+    for ax in axes:
+        ax.set_xlabel("Mean Expert GRS")
+
+    if figure_title is not None:
+        fig.suptitle(figure_title)
+
+    # Save high quality outputs
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
+    if save_pdf:
+        pdf_path = save_path.with_suffix(".pdf")
+        fig.savefig(pdf_path, bbox_inches="tight")
+
+    metrics = {
+        "left": metrics_left,
+        "right": metrics_right,
+    }
+
+    return fig, axes, metrics

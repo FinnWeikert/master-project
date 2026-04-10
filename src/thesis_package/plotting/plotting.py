@@ -367,3 +367,71 @@ def plot_predicted_vs_true(
 
     ax.legend(loc="lower right")
     return ax, metrics
+
+
+import umap
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import spearmanr
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import GroupKFold, cross_val_score
+
+def evaluate_embeddings(df_latents, df_meta):
+    """
+    df_latents: output from extract_latents (has 'video_id', 'latent_0'...'latent_7')
+    df_meta: your ground truth dataframe (has 'video_id', 'QRS_Overal', 'surgeon_id')
+    """
+    # 1. Merge Metadata
+    # We need the GRS score for every window to color the UMAP
+    df = df_latents.merge(df_meta[['video_id', 'QRS_Overal']], on='video_id')
+    latent_cols = [c for c in df.columns if c.startswith('latent_')]
+    
+    print(f"Evaluating {len(df)} windows across {df['video_id'].nunique()} videos...")
+
+    # 2. UMAP Projection (Sampling 10k points if data is too huge for a quick plot)
+    plot_df = df.sample(n=min(10000, len(df)), random_state=42)
+    reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, metric='euclidean')
+    embedding = reducer.fit_transform(plot_df[latent_cols])
+
+    plt.figure(figsize=(10, 7))
+    plt.scatter(embedding[:, 0], embedding[:, 1], c=plot_df['QRS_Overal'], 
+                cmap='viridis', s=1, alpha=0.5)
+    plt.colorbar(label='Total GRS Score')
+    plt.title("UMAP Projection of Motion Embeddings (Colored by Skill)")
+    plt.xlabel("UMAP 1")
+    plt.ylabel("UMAP 2")
+    plt.show()
+
+    # 3. Latent-to-GRS Spearman Correlation
+    # Do some latents correspond directly to skill?
+    correlations = {}
+    for col in latent_cols:
+        coef, p = spearmanr(df[col], df['QRS_Overal'])
+        correlations[col] = coef
+    
+    print("\nSpearman Correlation (Latent vs GRS):")
+    for k, v in correlations.items():
+        print(f"{k}: {v:.3f}")
+
+    # 4. Linear Proxy Model (The "Fast LOSO")
+    # Aggregating window-latents into one vector per video (Mean + Std)
+    video_features = df.groupby('video_id').agg({
+        **{col: ['mean', 'std'] for col in latent_cols},
+        'QRS_Overal': 'first',
+        'surgeon_id': 'first'
+    })
+    # Flatten multi-index columns
+    video_features.columns = [f"{a}_{b}" if b else a for a, b in video_features.columns]
+    
+    X = video_features.drop(columns=['QRS_Overal_first', 'surgeon_id_first'])
+    y = video_features['QRS_Overal_first']
+    groups = video_features['surgeon_id_first']
+
+    # Cross-validated R^2 using Surgeon-level groups
+    gkf = GroupKFold(n_splits=5)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    scores = cross_val_score(model, X, y, groups=groups, cv=gkf, scoring='r2')
+
+    print(f"\nProxy Model (Mean/Std Aggregation) LOSO R^2: {scores.mean():.3f} (+/- {scores.std():.3f})")
+    
+    return correlations, video_features

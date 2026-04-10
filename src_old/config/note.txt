@@ -1,6 +1,0 @@
-Store YAML/JSON defining:
-- which fps to use
-- window size
-- AE architecture size
-- which metrics to compute
-- which experiment ID

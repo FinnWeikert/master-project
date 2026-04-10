@@ -23,30 +23,7 @@ from thesis_package.data.loaders import (
 from thesis_package.features.kinematic_vocabulary import KinematicVocabulary
 from thesis_package.features.local_feature_extractor import WindowFeatureExtractor
 from thesis_package.training.evaluation import EvaluationConfig, LOSOEvaluator
-
-
-def ensure_output_dirs(*paths: Path) -> None:
-    for path in paths:
-        path.mkdir(parents=True, exist_ok=True)
-
-
-def print_performance(results: dict, title: str) -> None:
-    summary = results["summary"]
-    print(f"=== {title} ===")
-    print(f"MAE:        {summary['MAE']:.4f} ± {summary['MAE_STD']:.4f}")
-    print(f"Spearman ρ: {summary['Spearman_R']:.4f}")
-    print(f"R²:         {summary['R2']:.4f}\n")
-
-
-def build_results_row(model_name: str, results: dict) -> dict:
-    summary = results["summary"]
-    return {
-        "Model": model_name,
-        "MAE": summary["MAE"],
-        "MAE_STD": summary["MAE_STD"],
-        "Spearman_R": summary["Spearman_R"],
-        "R2": summary["R2"],
-    }
+from thesis_package.utils.script_utils import ensure_output_dirs, print_performance, build_results_row
 
 
 def load_window_features(
@@ -173,10 +150,10 @@ def main() -> None:
             seed=42,
         )
     )
-    bow_features = ['SurgeMe_' + str(i) for i in range(18)]
+    bow_features = ['BoW_' + str(i) for i in range(18)]
     results_rows = []
 
-    # ---------------- Model 1: PC1 + Case Type + SurgeMe (K=18) ----------------
+    # ---------------- Model 1: PC1 + Case Type + BoW (K=18) ----------------
     seed = 42
     vocab_k18 = make_vocab(n_clusters=18, seed=seed)
 
@@ -191,12 +168,12 @@ def main() -> None:
         leakage_free=True,
         use_baseline=True,
     )
-    print_performance(bow_hybrid_case_results, "PC1 + Case Type + SurgeMe (K=18)")
+    print_performance(bow_hybrid_case_results, "PC1 + Case Type + BoW (K=18)")
     results_rows.append(
-        build_results_row("PC1 + Case Type + SurgeMe", bow_hybrid_case_results)
+        build_results_row("PC1 + Case Type + BoW", bow_hybrid_case_results)
     )
 
-    # ---------------- Model 2: PC1 + Velocity Corr. + SurgeMe (K=18) ----------------
+    # ---------------- Model 2: PC1 + Velocity Corr. + BoW (K=18) ----------------
     if has_velocity_corr:
         vocab_k18_vel = make_vocab(n_clusters=18, seed=seed)
 
@@ -213,18 +190,18 @@ def main() -> None:
         )
         print_performance(
             bow_hybrid_velcorr_results,
-            "PC1 + Velocity Corr. + SurgeMe (K=18)",
+            "PC1 + Velocity Corr. + BoW (K=18)",
         )
         results_rows.append(
             build_results_row(
-                "PC1 + Velocity Corr. + SurgeMe",
+                "PC1 + Velocity Corr. + BoW",
                 bow_hybrid_velcorr_results,
             )
         )
     else:
         print("Warning: 'Velocity corr.' column not found. Skipping velocity-correlation BoW model.\n")
 
-    # ---------------- Model 3: SurgeMe only (BoW only, K=12) ----------------
+    # ---------------- Model 3: BoW only (K=12) ----------------
     vocab_k12 = make_vocab(n_clusters=12, seed=seed)
 
     bow_only_results = evaluator.evaluate_vocabulary(
@@ -238,8 +215,8 @@ def main() -> None:
         leakage_free=True,
         use_baseline=False,
     )
-    print_performance(bow_only_results, "SurgeMe only (K=12)")
-    results_rows.append(build_results_row("SurgeMe (BoW only)", bow_only_results))
+    print_performance(bow_only_results, "BoW only (K=12)")
+    results_rows.append(build_results_row("BoW only", bow_only_results))
 
     # ---------------- Save summary ----------------
     results_df = pd.DataFrame(results_rows)

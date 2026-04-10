@@ -25,6 +25,7 @@ from thesis_package.features.mil_scaler import MILFeatureScaler
 from thesis_package.models.attention_mil import HybridAttentionMIL
 from thesis_package.training.evaluation import EvaluationConfig, LOSOEvaluator
 from thesis_package.training.mil_training import run_training_unbiased
+from thesis_package.utils.script_utils import ensure_output_dirs, print_performance, build_results_row
 
 
 def parse_args():
@@ -35,29 +36,6 @@ def parse_args():
         help="If set, ignores saved models and trains all configurations from scratch.",
     )
     return parser.parse_args()
-
-
-def ensure_output_dirs(*paths: Path) -> None:
-    for path in paths:
-        path.mkdir(parents=True, exist_ok=True)
-
-
-def print_performance(summary: dict, title: str) -> None:
-    print(f"=== {title} ===")
-    print(f"MAE:        {summary['MAE']:.4f} ± {summary['MAE_STD']:.4f}")
-    print(f"Spearman ρ: {summary['Spearman_R']:.4f}")
-    print(f"R²:         {summary['R2']:.4f}\n")
-
-
-def build_results_row(model_name: str, results: dict) -> dict:
-    summary = results["summary"]
-    return {
-        "Model": model_name,
-        "MAE": summary["MAE"],
-        "MAE_STD": summary["MAE_STD"],
-        "Spearman_R": summary["Spearman_R"],
-        "R2": summary["R2"],
-    }
 
 
 def main():
@@ -149,7 +127,8 @@ def main():
         n_ensemble=5, test_size=1, save_models=True,
         load_path=get_load_path("mil_only.pt")
     )
-    print_performance(mil_only_results['summary'], 'MIL-Only (Window Features)')
+    # Pass the entire results dict instead of ['summary'] to match the shared util
+    print_performance(mil_only_results, 'MIL-Only (Window Features)')
     results_rows.append(build_results_row("MIL-Only (Window Features)", mil_only_results))
 
 
@@ -172,7 +151,7 @@ def main():
         n_ensemble=5, test_size=1, save_models=True,
         load_path=get_load_path("mean_pooling_only.pt")
     )
-    print_performance(mean_pool_results['summary'], 'Mean Pooling Only (Window Features)')
+    print_performance(mean_pool_results, 'Mean Pooling Only (Window Features)')
     results_rows.append(build_results_row("Mean Pooling Only", mean_pool_results))
 
 
@@ -195,7 +174,7 @@ def main():
         n_ensemble=5, test_size=1, save_models=True,
         load_path=get_load_path("hybrid_mil.pt")
     )
-    print_performance(hybrid_mil_results['summary'], 'Hybrid MIL (Window Features + PC1)')
+    print_performance(hybrid_mil_results, 'Hybrid MIL (Window Features + PC1)')
     results_rows.append(build_results_row("Hybrid MIL", hybrid_mil_results))
 
 
@@ -218,7 +197,7 @@ def main():
         n_ensemble=5, test_size=1, save_models=True,
         load_path=get_load_path("hybrid_mean_pooling.pt")
     )
-    print_performance(hybrid_mean_pool_results['summary'], 'Hybrid Mean Pooling (Window Features + PC1)')
+    print_performance(hybrid_mean_pool_results, 'Hybrid Mean Pooling (Window Features + PC1)')
     results_rows.append(build_results_row("Hybrid Mean Pooling", hybrid_mean_pool_results))
 
     # ---------------- Save Summary ----------------

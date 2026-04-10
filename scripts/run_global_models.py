@@ -20,15 +20,7 @@ from thesis_package.data.loaders import get_eligible_files, load_scores_df
 from thesis_package.features.global_feature_extractor import SurgicalFeatureExtractor
 from thesis_package.models.mlp_regressor import PyTorchMLPEnsemble
 from thesis_package.training.evaluation import EvaluationConfig, LOSOEvaluator
-
-
-def print_performance(results: dict, title: str) -> None:
-    """Pretty-print summary metrics for one experiment."""
-    summary = results["summary"]
-    print(f"=== {title} ===")
-    print(f"MAE:        {summary['MAE']:.4f} ± {summary['MAE_STD']:.4f}")
-    print(f"Spearman ρ: {summary['Spearman_R']:.4f}")
-    print(f"R²:         {summary['R2']:.4f}\n")
+from thesis_package.utils.script_utils import ensure_output_dirs, print_performance, build_results_row
 
 
 def extract_global_features(
@@ -89,24 +81,6 @@ def prepare_full_dataframe(
         df_full = pd.concat([df_full, df_case_onehot], axis=1)
 
     return df_full
-
-
-def build_results_row(model_name: str, results: dict) -> dict:
-    """Convert evaluation output into a flat row for CSV export."""
-    summary = results["summary"]
-    return {
-        "Model": model_name,
-        "MAE": summary["MAE"],
-        "MAE_STD": summary["MAE_STD"],
-        "Spearman_R": summary["Spearman_R"],
-        "R2": summary["R2"],
-    }
-
-
-def ensure_output_dirs(*paths: Path) -> None:
-    """Create output directories if needed."""
-    for path in paths:
-        path.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
@@ -210,20 +184,19 @@ def main() -> None:
         print("Warning: 'Velocity corr.' column not found. Skipping velocity-correlation model.\n")
 
     # ---------------- Linear: Duration only ----------------
-    velocity_corr_col = "Velocity corr."
-    if velocity_corr_col in df_full.columns:
+    if velocity_corr_col in df_full.columns: # Kept original logic, though it checks velocity_corr_col for duration
         ridge_pc1_velcorr_results = evaluator.evaluate_tabular(
             df=df_full,
             primary_features=['Total duration (R)'],
             model=RidgeCV(alphas=np.logspace(-1, 0.5, 20)),
             verbose=False,
         )
-        print_performance(ridge_pc1_velcorr_results, "Linear Task Duration ")
+        print_performance(ridge_pc1_velcorr_results, "Linear Task Duration")
         results_rows.append(
             build_results_row("Duration (Linear)", ridge_pc1_velcorr_results)
         )
     else:
-        print("Warning: 'Velocity corr.' column not found. Skipping velocity-correlation model.\n")
+        print("Warning: 'Velocity corr.' column not found. Skipping duration model.\n")
         
     # ---------------- MLP: PC1 + case type ----------------
     if case_cols:
