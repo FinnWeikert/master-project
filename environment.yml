@@ -1,0 +1,27 @@
+name: env-ml
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.12.11
+  - pytorch=2.5.1
+  - torchvision=0.20.1
+  - torchaudio=2.5.1
+  - cpuonly=2.0
+  - pandas=2.3.1
+  - numpy=2.3.1
+  - scikit-learn=1.7.1
+  - scipy=1.16.0
+  - matplotlib=3.10.0
+  - jupyter=1.1.1
+  - ipykernel=6.29.5
+  - tqdm=4.67.1
+  - seaborn=0.13.2
+  - statsmodels=0.14.5
+  - pingouin=0.6.0
+  - pip=25.3
+  - pip:
+      - sktime==0.40.1
+      - umap-learn==0.5.9.post2
