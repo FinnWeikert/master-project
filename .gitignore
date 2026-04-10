@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------
 
 # Ignore everything in the /data folder
-data/*
+#data/*
 
 # But keep the folder itself (optional)
 !data/.gitkeep
