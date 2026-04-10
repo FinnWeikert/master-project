@@ -17,7 +17,8 @@ def plot_combined_feature_screening_figure(
     features,
     target="QRS_Overal",
     strong_threshold=0.5,
-    figsize=(12, 9)
+    figsize=(12, 9),
+    save_path=None
 ):
 
     # --- Compute correlations ---
@@ -112,11 +113,12 @@ def plot_combined_feature_screening_figure(
     #ax_heat.set_title("Intercorrelation of Motion Descriptors")
 
     # save 
-    plt.savefig(
-        "feature_screening_combined.pdf",
-        bbox_inches="tight",
-        dpi=300
-    )
+    if save_path is not None:
+        plt.savefig(
+            save_path,
+            bbox_inches="tight",
+            dpi=300
+        )
 
     plt.show()
 
@@ -126,7 +128,7 @@ def plot_combined_feature_screening_figure(
 
 # bow sensitivity anaylsis
 
-def plot_single_metric_sensitivity(cluster_range, results_dict, metric='R2', baseline_value=None, top_k=18):
+def plot_single_metric_sensitivity(cluster_range, results_dict, metric='R2', baseline_value=None, top_k=18, save_path=None):
     """
     Plots a single metric across clusters with seed-based error bars and a baseline comparison.
     
@@ -181,7 +183,7 @@ def plot_single_metric_sensitivity(cluster_range, results_dict, metric='R2', bas
     plt.tight_layout()
 
     plt.savefig(
-        "cluster_sensitivity_plot.pdf",
+        save_path or "cluster_sensitivity_plot.pdf",
         bbox_inches="tight",
         dpi=300
     )
@@ -191,7 +193,7 @@ def plot_single_metric_sensitivity(cluster_range, results_dict, metric='R2', bas
 
 # BoW Selection SurgeMe interpretation
 
-def plot_surgeme_stability(df_stability, global_centroids, title="Kinematic Stability of BoW Centroids Across 28 LOSO Folds", save_fig=False):
+def plot_surgeme_stability(df_stability, global_centroids, title="Kinematic Stability of BoW Centroids Across 28 LOSO Folds", save_path=None):
     """
     Plots a 2x2 grid of boxplots with selective axis labels and optional title.
     """
@@ -253,9 +255,9 @@ def plot_surgeme_stability(df_stability, global_centroids, title="Kinematic Stab
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper right")
 
-    if save_fig:
+    if save_path is not None:
         plt.savefig(
-            "bow_loso_stability.pdf",
+            save_path,
             bbox_inches="tight",
             dpi=300
         )
@@ -263,7 +265,7 @@ def plot_surgeme_stability(df_stability, global_centroids, title="Kinematic Stab
     plt.show()
 
 
-def plot_surgeme_radar(global_centroids, feature_labels, cluster_info):
+def plot_surgeme_radar(global_centroids, feature_labels, cluster_info, save_path=None):
     """
     Thesis-quality radar plot for selected Surgeme centroids.
     Z-order is inverted: The first item in cluster_info is rendered on top.
@@ -346,7 +348,8 @@ def plot_surgeme_radar(global_centroids, feature_labels, cluster_info):
     )
 
     plt.tight_layout()
-    plt.savefig("radar_plot.pdf", bbox_inches="tight", dpi=300)
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight", dpi=300)
     plt.show()
 
 

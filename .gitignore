@@ -41,3 +41,4 @@ docs/_build/
 # Temporary / OS files
 *~
 .DS_Store
+results/.DS_Store

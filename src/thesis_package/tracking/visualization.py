@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 
-def draw_hands(df_hand_left, df_hand_right, title="Hand Trajectories", background=None):
+def draw_hands(df_hand_left, df_hand_right, title="Hand Trajectories", background=None, save_path=None):
     """
     Draws processed hand positions in the video plane (1920x1080).
     
@@ -74,11 +74,12 @@ def draw_hands(df_hand_left, df_hand_right, title="Hand Trajectories", backgroun
 
     plt.tight_layout()
 
-    plt.savefig(
-        "trajectories.pdf",
-        bbox_inches="tight",
-        dpi=300
-    )
+    if save_path is not None:
+        plt.savefig(
+            save_path,
+            bbox_inches="tight",
+            dpi=300
+        )
     
     plt.show()
 
