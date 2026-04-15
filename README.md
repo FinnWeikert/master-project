@@ -5,6 +5,7 @@
 This repository accompanies the master thesis:
 
 > *Seeing Surgical Skill: Vision-Based Hand Motion Analysis for Assessment in Orthopedic Trauma Training*
+> 
 > Finn Weikert, 2026
 
 ---
